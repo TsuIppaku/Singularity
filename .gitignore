@@ -1,0 +1,28 @@
+dist/
+artifacts/
+*.user
+*.suo
+.vs/
+bin/
+obj/
+*.log
+*.zip
+*.bak
+*.tmp
+
+# Local settings and credentials
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Personal runtime data must never enter a source snapshot.
+state.json
+state.*.json
+notes.txt
+clipboard-slots.json
+clipboard-history.json
+clipboard-history-images/
+clipboard-drag-exports/
