@@ -92,6 +92,7 @@ namespace Orbit
         private readonly DispatcherTimer ticker;
         private readonly DispatcherTimer chimeTimer;
         private readonly DispatcherTimer savePositionTimer;
+        private readonly DispatcherTimer previewDismissTimer;
         private Forms.NotifyIcon tray;
         private Drawing.Icon trayIcon;
         private EventWaitHandle showSignal;
@@ -101,6 +102,8 @@ namespace Orbit
         private bool positioning;
         private bool placementDirty;
         private bool switchingTools;
+        private bool launcherPreview;
+        private bool toolsPinned;
         private DispatcherOperation pendingPlacement;
         private PopupSide? panelSide;
         private Drawing.Rectangle? lastPanelAnchor;
@@ -129,6 +132,14 @@ namespace Orbit
             chimeTimer.Tick += delegate { if (Engine.AlertTask != null) Chime(); };
             savePositionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             savePositionTimer.Tick += delegate { savePositionTimer.Stop(); SavePosition(); };
+            previewDismissTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(520) };
+            previewDismissTimer.Tick += delegate { previewDismissTimer.Stop(); DismissPreviewIfAway(IsPointerInPreviewRegion()); };
+            Dot.MouseEnter += delegate { PreviewLauncher(); };
+            Dot.MouseLeave += delegate { SchedulePreviewDismissal(); };
+            Launcher.MouseEnter += delegate { KeepPreviewOpen(); };
+            Launcher.MouseLeave += delegate { SchedulePreviewDismissal(); };
+            Panel.Deactivated += delegate { RequestOutsideDismissal(); };
+            Utilities.Deactivated += delegate { RequestOutsideDismissal(); };
         }
 
         internal void Start()
@@ -242,7 +253,11 @@ namespace Orbit
         internal void ClickDot()
         {
             if (Engine.AlertTask != null) { Acknowledge(); return; }
-            if (Launcher.IsVisible) HideTools(); else ShowLauncher();
+            if (!Launcher.IsVisible) { ShowLauncher(); return; }
+            // A hover reveal becomes intentional only when it is clicked. The
+            // first click pins it; later clicks use the familiar collapse action.
+            if (launcherPreview && !Panel.IsVisible && !Utilities.IsVisible) { PinTools(); return; }
+            HideTools();
         }
 
         internal void ShowPanel()
@@ -253,13 +268,85 @@ namespace Orbit
         internal void ShowLauncher()
         {
             if (IsExiting) return;
+            PinTools();
             if (Launcher.IsVisible) { RepositionTools(); return; }
             PresentTool(Launcher, null);
         }
 
+        internal void PreviewLauncher()
+        {
+            if (IsExiting || Panel.IsVisible || Utilities.IsVisible) return;
+            if (Launcher.IsVisible) { KeepPreviewOpen(); return; }
+            toolsPinned = false;
+            launcherPreview = true;
+            previewDismissTimer.Stop();
+            PresentTool(Launcher, null);
+        }
+
+        private void PinTools()
+        {
+            launcherPreview = false;
+            toolsPinned = true;
+            previewDismissTimer.Stop();
+        }
+
+        private void KeepPreviewOpen()
+        {
+            if (launcherPreview) previewDismissTimer.Stop();
+        }
+
+        private void SchedulePreviewDismissal()
+        {
+            if (!launcherPreview || toolsPinned || Panel.IsVisible || Utilities.IsVisible) return;
+            previewDismissTimer.Stop();
+            previewDismissTimer.Start();
+        }
+
+        private bool IsPointerInPreviewRegion()
+        {
+            if (!Dot.IsVisible || !Launcher.IsVisible) return false;
+            Drawing.Rectangle region = Drawing.Rectangle.Union(Placement.Rectangle(Dot), Placement.Rectangle(Launcher));
+            region.Inflate(24, 24);
+            Point pointer = NativeDesktop.CursorPosition;
+            return region.Contains((int)pointer.X, (int)pointer.Y);
+        }
+
+        private static bool PointerIsOver(Window window, Point pointer)
+        {
+            if (window == null || !window.IsVisible) return false;
+            var bounds = Placement.Bounds(window);
+            return pointer.X >= bounds.Left && pointer.X < bounds.Right && pointer.Y >= bounds.Top && pointer.Y < bounds.Bottom;
+        }
+
+        private void DismissPreviewIfAway(bool pointerInPreviewRegion)
+        {
+            if (launcherPreview && !toolsPinned && !Panel.IsVisible && !Utilities.IsVisible && !pointerInPreviewRegion) HideTools();
+        }
+
+        private void RequestOutsideDismissal()
+        {
+            if (IsTest || IsExiting || !toolsPinned || switchingTools) return;
+            Dot.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(delegate
+            {
+                if (IsExiting || !toolsPinned || switchingTools || !Launcher.IsVisible) return;
+                Point pointer = NativeDesktop.CursorPosition;
+                if (!PointerIsOver(Dot, pointer) && !PointerIsOver(Launcher, pointer) &&
+                    !PointerIsOver(Panel, pointer) && !PointerIsOver(Utilities, pointer) && !PointerIsOver(Reminder, pointer))
+                    HideTools();
+            }));
+        }
+
+        // Keeps the interaction state directly testable without reading the real cursor.
+        internal void DismissPreviewForTest(bool pointerInPreviewRegion) { DismissPreviewIfAway(pointerInPreviewRegion); }
+        internal bool LauncherIsPreview { get { return launcherPreview; } }
+        internal bool ToolsArePinned { get { return toolsPinned; } }
+
         internal void HideTools()
         {
             if (!Utilities.Flush()) { ShowUnsavedNotes(); return; }
+            previewDismissTimer.Stop();
+            launcherPreview = false;
+            toolsPinned = false;
             Panel.Hide(); Utilities.Hide(); Launcher.Hide();
             panelSide = null; lastPanelAnchor = null;
         }
@@ -268,6 +355,7 @@ namespace Orbit
         {
             if (IsExiting) return;
             if (!Utilities.Flush()) { ShowUnsavedNotes(); return; }
+            PinTools();
             bool alreadyOpen = (mode == "timer" && Panel.IsVisible) || (Utilities.IsVisible && Utilities.Mode == mode);
             if (alreadyOpen)
             {

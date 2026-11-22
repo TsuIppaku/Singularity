@@ -28,6 +28,13 @@ namespace Orbit
                 var working = Placement.WorkArea(app.Dot);
                 Placement.Move(app.Dot, working.Left + working.Width / 2 - 38, working.Top + 45);
                 Check(app.Dot.IsVisible && app.Dot.Topmost && !app.Dot.ShowInTaskbar, "Native dot remains an independent topmost window");
+                app.PreviewLauncher(); Pump();
+                Check(app.Launcher.IsVisible && app.LauncherIsPreview && !app.ToolsArePinned && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Hover preview reveals only the three-tool launcher");
+                app.DismissPreviewForTest(false); Pump();
+                Check(!app.Launcher.IsVisible && !app.LauncherIsPreview, "Leaving the expanded hover region collapses the preview");
+                app.PreviewLauncher(); app.ClickDot(); app.DismissPreviewForTest(false); Pump();
+                Check(app.Launcher.IsVisible && app.ToolsArePinned && !app.LauncherIsPreview, "Clicking a hover preview pins it instead of allowing automatic dismissal");
+                app.HideTools();
                 app.ClickDot(); Pump();
                 Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking dot reveals only the three-tool launcher");
                 Check(app.Launcher.ToolButton("timer").ToolTip != null && app.Launcher.ToolButton("notes").ToolTip != null && app.Launcher.ToolButton("clipboard").ToolTip != null, "All three tools expose hover descriptions");
