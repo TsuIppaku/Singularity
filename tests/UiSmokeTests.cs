@@ -34,6 +34,8 @@ namespace Orbit
                 Check(!app.Launcher.IsVisible && !app.LauncherIsPreview, "Leaving the expanded hover region collapses the preview");
                 app.PreviewLauncher(); app.ClickDot(); app.DismissPreviewForTest(false); Pump();
                 Check(app.Launcher.IsVisible && app.ToolsArePinned && !app.LauncherIsPreview, "Clicking a hover preview pins it instead of allowing automatic dismissal");
+                app.ClickOutsideForTest(new Point(working.Left, working.Bottom)); Pump();
+                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "An outside click closes a pinned toolbar even when no child panel is open");
                 app.HideTools();
                 app.ClickDot(); Pump();
                 Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking dot reveals only the three-tool launcher");

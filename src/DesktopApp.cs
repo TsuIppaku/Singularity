@@ -12,6 +12,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Markup;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Forms = System.Windows.Forms;
 using Drawing = System.Drawing;
@@ -70,6 +71,7 @@ namespace Orbit
 
     internal sealed class AppController
     {
+        private const int PreviewGracePixels = 14;
         internal readonly TimerEngine Engine;
         internal readonly ClipboardHistory ClipboardHistory;
         internal readonly DotWindow Dot;
@@ -93,6 +95,7 @@ namespace Orbit
         private readonly DispatcherTimer chimeTimer;
         private readonly DispatcherTimer savePositionTimer;
         private readonly DispatcherTimer previewDismissTimer;
+        private GlobalMouseClickMonitor mouseMonitor;
         private Forms.NotifyIcon tray;
         private Drawing.Icon trayIcon;
         private EventWaitHandle showSignal;
@@ -104,6 +107,8 @@ namespace Orbit
         private bool switchingTools;
         private bool launcherPreview;
         private bool toolsPinned;
+        private bool previewHiding;
+        private int previewFadeGeneration;
         private DispatcherOperation pendingPlacement;
         private PopupSide? panelSide;
         private Drawing.Rectangle? lastPanelAnchor;
@@ -132,7 +137,7 @@ namespace Orbit
             chimeTimer.Tick += delegate { if (Engine.AlertTask != null) Chime(); };
             savePositionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             savePositionTimer.Tick += delegate { savePositionTimer.Stop(); SavePosition(); };
-            previewDismissTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(520) };
+            previewDismissTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(280) };
             previewDismissTimer.Tick += delegate { previewDismissTimer.Stop(); DismissPreviewIfAway(IsPointerInPreviewRegion()); };
             Dot.MouseEnter += delegate { PreviewLauncher(); };
             Dot.MouseLeave += delegate { SchedulePreviewDismissal(); };
@@ -158,6 +163,15 @@ namespace Orbit
                 clipboardMonitor.Start();
                 ticker.Start();
                 CreateTray();
+                string mouseError;
+                mouseMonitor = new GlobalMouseClickMonitor();
+                mouseMonitor.Pressed += OnGlobalMousePressed;
+                if (!mouseMonitor.TryStart(out mouseError))
+                {
+                    mouseMonitor.Dispose();
+                    mouseMonitor = null;
+                    Panel.ShowError("无法监听窗口外点击：" + mouseError);
+                }
                 showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\Singularity.Orbit.Show");
                 signalRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, delegate { Dot.Dispatcher.BeginInvoke(new Action(ShowPanel)); }, null, Timeout.Infinite, false);
             }
@@ -288,11 +302,14 @@ namespace Orbit
             launcherPreview = false;
             toolsPinned = true;
             previewDismissTimer.Stop();
+            CancelPreviewFade();
         }
 
         private void KeepPreviewOpen()
         {
-            if (launcherPreview) previewDismissTimer.Stop();
+            if (!launcherPreview) return;
+            previewDismissTimer.Stop();
+            CancelPreviewFade();
         }
 
         private void SchedulePreviewDismissal()
@@ -305,22 +322,50 @@ namespace Orbit
         private bool IsPointerInPreviewRegion()
         {
             if (!Dot.IsVisible || !Launcher.IsVisible) return false;
-            Drawing.Rectangle region = Drawing.Rectangle.Union(Placement.Rectangle(Dot), Placement.Rectangle(Launcher));
-            region.Inflate(24, 24);
             Point pointer = NativeDesktop.CursorPosition;
-            return region.Contains((int)pointer.X, (int)pointer.Y);
+            // Keep two compact halos rather than a large rectangular bridge.
+            return PointerIsWithin(Dot, pointer, PreviewGracePixels) ||
+                PointerIsWithin(Launcher, pointer, PreviewGracePixels);
         }
 
-        private static bool PointerIsOver(Window window, Point pointer)
+        private static bool PointerIsWithin(Window window, Point pointer, int padding)
         {
             if (window == null || !window.IsVisible) return false;
             var bounds = Placement.Bounds(window);
-            return pointer.X >= bounds.Left && pointer.X < bounds.Right && pointer.Y >= bounds.Top && pointer.Y < bounds.Bottom;
+            return pointer.X >= bounds.Left - padding && pointer.X < bounds.Right + padding &&
+                pointer.Y >= bounds.Top - padding && pointer.Y < bounds.Bottom + padding;
         }
 
         private void DismissPreviewIfAway(bool pointerInPreviewRegion)
         {
-            if (launcherPreview && !toolsPinned && !Panel.IsVisible && !Utilities.IsVisible && !pointerInPreviewRegion) HideTools();
+            if (launcherPreview && !toolsPinned && !Panel.IsVisible && !Utilities.IsVisible && !pointerInPreviewRegion) BeginPreviewFade();
+        }
+
+        private void BeginPreviewFade()
+        {
+            if (previewHiding || !Launcher.IsVisible) return;
+            previewHiding = true;
+            int generation = ++previewFadeGeneration;
+            var fade = new DoubleAnimation(Launcher.Opacity, 0, TimeSpan.FromMilliseconds(125))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            fade.Completed += delegate
+            {
+                if (previewFadeGeneration != generation || !previewHiding) return;
+                previewHiding = false;
+                if (launcherPreview && !toolsPinned && !IsPointerInPreviewRegion()) HideTools();
+            };
+            Launcher.BeginAnimation(UIElement.OpacityProperty, fade, HandoffBehavior.SnapshotAndReplace);
+        }
+
+        private void CancelPreviewFade()
+        {
+            previewHiding = false;
+            previewFadeGeneration++;
+            if (!Launcher.IsVisible) return;
+            Launcher.BeginAnimation(UIElement.OpacityProperty, null);
+            Launcher.Opacity = 1;
         }
 
         private void RequestOutsideDismissal()
@@ -330,14 +375,30 @@ namespace Orbit
             {
                 if (IsExiting || !toolsPinned || switchingTools || !Launcher.IsVisible) return;
                 Point pointer = NativeDesktop.CursorPosition;
-                if (!PointerIsOver(Dot, pointer) && !PointerIsOver(Launcher, pointer) &&
-                    !PointerIsOver(Panel, pointer) && !PointerIsOver(Utilities, pointer) && !PointerIsOver(Reminder, pointer))
-                    HideTools();
+                HideToolsIfOutside(pointer);
             }));
         }
 
+        private void OnGlobalMousePressed(Point pointer)
+        {
+            if (IsTest || IsExiting || !Launcher.IsVisible) return;
+            Dot.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(delegate { HideToolsIfOutside(pointer); }));
+        }
+
+        private void HideToolsIfOutside(Point pointer)
+        {
+            if (IsExiting || !Launcher.IsVisible) return;
+            if (!PointerIsWithin(Dot, pointer, 0) && !PointerIsWithin(Launcher, pointer, 0) &&
+                !PointerIsWithin(Panel, pointer, 0) && !PointerIsWithin(Utilities, pointer, 0) && !PointerIsWithin(Reminder, pointer, 0))
+                HideTools();
+        }
+
         // Keeps the interaction state directly testable without reading the real cursor.
-        internal void DismissPreviewForTest(bool pointerInPreviewRegion) { DismissPreviewIfAway(pointerInPreviewRegion); }
+        internal void DismissPreviewForTest(bool pointerInPreviewRegion)
+        {
+            if (launcherPreview && !toolsPinned && !pointerInPreviewRegion) HideTools();
+        }
+        internal void ClickOutsideForTest(Point pointer) { HideToolsIfOutside(pointer); }
         internal bool LauncherIsPreview { get { return launcherPreview; } }
         internal bool ToolsArePinned { get { return toolsPinned; } }
 
@@ -347,6 +408,7 @@ namespace Orbit
             previewDismissTimer.Stop();
             launcherPreview = false;
             toolsPinned = false;
+            CancelPreviewFade();
             Panel.Hide(); Utilities.Hide(); Launcher.Hide();
             panelSide = null; lastPanelAnchor = null;
         }
@@ -716,6 +778,7 @@ namespace Orbit
             IsExiting = true;
             ticker.Stop(); chimeTimer.Stop(); savePositionTimer.Stop();
             if (clipboardMonitor != null) clipboardMonitor.Dispose();
+            if (mouseMonitor != null) { mouseMonitor.Dispose(); mouseMonitor = null; }
             Engine.Tick(Now()); SavePosition();
             Utilities.Flush();
             sound.Dispose();
