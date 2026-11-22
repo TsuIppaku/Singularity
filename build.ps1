@@ -17,6 +17,11 @@ $testExe = Join-Path $artifactDir 'TimerEngineTests.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Core test compilation failed.' }
 & $testExe
 if ($LASTEXITCODE -ne 0) { throw 'Core tests failed.' }
+$startupTestExe = Join-Path $artifactDir 'StartupRegistrationTests.exe'
+& $compiler @common /target:exe /main:Orbit.StartupRegistrationTests ('/out:' + $startupTestExe) $corePath (Join-Path $projectDir 'src\PlatformServices.cs') (Join-Path $projectDir 'tests\StartupRegistrationTests.cs')
+if ($LASTEXITCODE -ne 0) { throw 'Startup registration test compilation failed.' }
+& $startupTestExe
+if ($LASTEXITCODE -ne 0) { throw 'Startup registration tests failed.' }
 $layoutTestExe = Join-Path $artifactDir 'PopupLayoutTests.exe'
 & $compiler @common /target:exe ('/out:' + $layoutTestExe) (Join-Path $projectDir 'src\PopupLayout.cs') (Join-Path $projectDir 'tests\PopupLayoutTests.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Popup layout test compilation failed.' }

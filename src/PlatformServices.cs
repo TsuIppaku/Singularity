@@ -7,6 +7,7 @@ using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Windows;
 using System.Windows.Interop;
+using Microsoft.Win32;
 
 namespace Orbit
 {
@@ -137,6 +138,104 @@ namespace Orbit
         {
             return error is OutOfMemoryException || error is StackOverflowException ||
                 error is AccessViolationException;
+        }
+    }
+
+    internal interface IStartupRegistry
+    {
+        string Read(string name);
+        void Write(string name, string command);
+        void Remove(string name);
+    }
+
+    internal sealed class CurrentUserStartupRegistry : IStartupRegistry
+    {
+        private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+
+        public string Read(string name)
+        {
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKey, false))
+                return key == null ? null : key.GetValue(name) as string;
+        }
+
+        public void Write(string name, string command)
+        {
+            using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RunKey))
+                key.SetValue(name, command, RegistryValueKind.String);
+        }
+
+        public void Remove(string name)
+        {
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKey, true))
+            {
+                if (key != null) key.DeleteValue(name, false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Registers only the current Windows user. It never needs elevation and never
+    /// writes outside the standard Startup Apps registry location.
+    /// </summary>
+    internal sealed class StartupRegistration
+    {
+        internal const string ValueName = "Singularity Orbit";
+        private readonly IStartupRegistry registry;
+
+        internal StartupRegistration() : this(new CurrentUserStartupRegistry()) { }
+
+        internal StartupRegistration(IStartupRegistry registry)
+        {
+            if (registry == null) throw new ArgumentNullException("registry");
+            this.registry = registry;
+        }
+
+        internal bool TrySet(bool enabled, string applicationPath, out string error)
+        {
+            error = null;
+            try
+            {
+                if (enabled)
+                {
+                    if (String.IsNullOrWhiteSpace(applicationPath))
+                        throw new ArgumentException("Orbit 的启动路径无效。", "applicationPath");
+                    string fullPath = Path.GetFullPath(applicationPath);
+                    registry.Write(ValueName, Quote(fullPath));
+                }
+                else registry.Remove(ValueName);
+                return true;
+            }
+            catch (Exception exception)
+            {
+                if (exception is OutOfMemoryException || exception is StackOverflowException || exception is AccessViolationException) throw;
+                error = exception.Message;
+                return false;
+            }
+        }
+
+        internal bool TryIsEnabled(out bool enabled, out string error)
+        {
+            enabled = false;
+            error = null;
+            try
+            {
+                enabled = !String.IsNullOrWhiteSpace(registry.Read(ValueName));
+                return true;
+            }
+            catch (Exception exception)
+            {
+                if (exception is OutOfMemoryException || exception is StackOverflowException || exception is AccessViolationException) throw;
+                error = exception.Message;
+                return false;
+            }
+        }
+
+        private static string Quote(string path)
+        {
+            // A Windows executable path cannot contain a double quote. Quoting the
+            // whole path keeps Program Files paths intact when Explorer starts it.
+            if (path.IndexOf('"') >= 0) throw new ArgumentException("Orbit 的启动路径包含无效字符。", "path");
+            return '"' + path + '"';
         }
     }
 

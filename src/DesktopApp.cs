@@ -86,6 +86,7 @@ namespace Orbit
         internal bool IsTest { get; private set; }
         private readonly StateStore store;
         private readonly AlertSound sound;
+        private readonly StartupRegistration startup;
         private ClipboardMonitor clipboardMonitor;
         private readonly ClipboardDragExport clipboardDragExport;
         private readonly DispatcherTimer ticker;
@@ -114,6 +115,7 @@ namespace Orbit
             ClipboardHistory = new ClipboardHistory(directory);
             clipboardDragExport = new ClipboardDragExport(directory);
             sound = new AlertSound();
+            startup = new StartupRegistration();
             Dot = new DotWindow(this);
             Panel = new TaskPanel(this);
             Launcher = new LauncherWindow(this);
@@ -139,6 +141,7 @@ namespace Orbit
             else if (Engine.State.WasRepaired) Panel.ShowError("已恢复保存数据中的异常字段，相关计时已暂停，请检查后继续。");
             if (!IsTest)
             {
+                ConfigureStartup();
                 clipboardMonitor = new ClipboardMonitor(Dot, CaptureClipboardEntry,
                     delegate(string message) { Utilities.SetClipboardStatus(message, !String.IsNullOrEmpty(message)); });
                 clipboardMonitor.Start();
@@ -505,6 +508,48 @@ namespace Orbit
 
         internal void ResetPosition() { Placement.RestoreDot(Dot, null, null); Moved(); }
 
+        private void ConfigureStartup()
+        {
+            if (!Engine.State.StartWithWindows.HasValue)
+            {
+                MessageBoxResult answer = MessageBox.Show(
+                    "Orbit 会在你登录 Windows 后自动启动，并安静显示桌面小球。\n\n你可以随时从 Orbit 的右键菜单或 Windows 的“启动应用”中关闭它。",
+                    "允许 Orbit 开机启动？", MessageBoxButton.YesNo, MessageBoxImage.Question, MessageBoxResult.Yes);
+                if (!SetStartup(answer == MessageBoxResult.Yes, false)) return;
+            }
+            else if (Engine.State.StartWithWindows.Value)
+            {
+                string error;
+                if (!startup.TrySet(true, ApplicationPath(), out error))
+                    Panel.ShowError("开机启动未能恢复：" + error);
+            }
+        }
+
+        private string ApplicationPath()
+        {
+            string path = Assembly.GetEntryAssembly() == null ? null : Assembly.GetEntryAssembly().Location;
+            if (String.IsNullOrWhiteSpace(path)) path = Assembly.GetExecutingAssembly().Location;
+            return path;
+        }
+
+        private bool SetStartup(bool enabled, bool reportError)
+        {
+            string error;
+            if (!startup.TrySet(enabled, ApplicationPath(), out error))
+            {
+                if (reportError) Panel.ShowError("无法更改开机启动：" + error);
+                return false;
+            }
+            bool? previous = Engine.State.StartWithWindows;
+            Engine.State.StartWithWindows = enabled;
+            if (Save()) return true;
+            Engine.State.StartWithWindows = previous;
+            // A failed preference save must not leave an unrecorded startup entry.
+            string ignored;
+            startup.TrySet(previous == true, ApplicationPath(), out ignored);
+            return false;
+        }
+
         internal ContextMenu DotMenu()
         {
             var menu = new ContextMenu();
@@ -520,6 +565,12 @@ namespace Orbit
             var mute = new MenuItem { Header = "静音", IsCheckable = true, IsChecked = muted };
             mute.Click += delegate { muted = mute.IsChecked; if (muted) sound.Stop(); };
             menu.Items.Add(mute);
+            var startupItem = new MenuItem { Header = "登录 Windows 时启动 Orbit", IsCheckable = true, IsChecked = Engine.State.StartWithWindows == true };
+            startupItem.Click += delegate
+            {
+                if (!SetStartup(startupItem.IsChecked, true)) startupItem.IsChecked = Engine.State.StartWithWindows == true;
+            };
+            menu.Items.Add(startupItem);
             AddMenu(menu, "小点回到屏幕右侧", ResetPosition);
             menu.Items.Add(new Separator());
             AddMenu(menu, "退出 Orbit", Exit);
@@ -541,6 +592,13 @@ namespace Orbit
             menu.Items.Add("打开任务清单", null, delegate { ShowPanel(); });
             menu.Items.Add("小点回到屏幕右侧", null, delegate { ResetPosition(); });
             menu.Items.Add("停止提醒", null, delegate { Acknowledge(); });
+            var startupItem = menu.Items.Add("登录 Windows 时启动 Orbit", null, delegate(object sender, EventArgs e)
+            {
+                var item = sender as Forms.ToolStripMenuItem;
+                SetStartup(item != null && item.Checked, true);
+            }) as Forms.ToolStripMenuItem;
+            startupItem.CheckOnClick = true;
+            startupItem.Checked = Engine.State.StartWithWindows == true;
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("退出 Orbit", null, delegate { Exit(); });
             tray.ContextMenuStrip = menu;

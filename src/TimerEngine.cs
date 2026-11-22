@@ -44,6 +44,9 @@ namespace Orbit
         [DataMember(Order = 3)] public double? DotLeft { get; set; }
         [DataMember(Order = 4)] public double? DotTop { get; set; }
         [DataMember(Order = 5)] public Dictionary<string, int> DailyTaskNumbers { get; set; }
+        // null means this installation has not yet asked the user about startup.
+        // Once chosen, the preference remains stable across launches.
+        [DataMember(Order = 6)] public bool? StartWithWindows { get; set; }
         [IgnoreDataMember] public bool WasRepaired { get; set; }
     }
 
