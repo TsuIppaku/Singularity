@@ -1,4 +1,4 @@
-# Singularity · Orbit v0.5.0
+# Singularity · Orbit v0.6.0
 
 奇点项目的 Windows 桌面助手：一个悬浮小点，打开任务计时器、记事本和自动记录最近 3 项的剪贴板。
 
