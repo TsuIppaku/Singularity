@@ -29,7 +29,7 @@ namespace Orbit
                 Placement.Move(app.Dot, working.Left + working.Width / 2 - 38, working.Top + 45);
                 Check(app.Dot.IsVisible && app.Dot.Topmost && !app.Dot.ShowInTaskbar, "Native dot remains an independent topmost window");
                 app.Dot.SetPointerOffsetForTest(new Point(-93, 0));
-                CheckLedOrb(app, output, "00-led-idle-near-left.png", true, 26);
+                CheckLedOrb(app, output, "00-led-idle-near-left.png", true, 28);
                 app.Dot.SetPointerOffsetForTest(new Point(-2800, 0));
                 CheckLedOrb(app, output, "00-led-idle-distant-centered.png", true, 48, 40);
                 app.Dot.SetGazeForTest(new Point(10, -8));
@@ -874,8 +874,43 @@ namespace Orbit
                 Check(red > 0 && centroidX < maxRedCentroidX.Value && (!minRedCentroidX.HasValue || centroidX >= minRedCentroidX.Value),
                     minRedCentroidX.HasValue ? "A distant pointer leaves the idle LED eye centered instead of following across the desktop" : "A nearby pointer can move the LED eye close to the left face edge");
             }
+            if (fileName == "00-led-idle-right-up.png")
+            {
+                // Probe the shell without the transient hover scale on the live visual.
+                var shell = new DrawingVisual();
+                using (var context = shell.RenderOpen())
+                    new LedFaceRenderer().Draw(context, new Point(), 1, 0, 0, 1, String.Empty, false, false);
+                foreach (double targetDpi in new[] { dpi.PixelsPerInchX, 96.0, 144.0 }.Distinct())
+                {
+                    double scale = targetDpi / 96;
+                    var densityProbe = new RenderTargetBitmap((int)Math.Ceiling(88 * scale), (int)Math.Ceiling(88 * scale), targetDpi, targetDpi, PixelFormats.Pbgra32);
+                    densityProbe.Render(shell);
+                    CheckVisibleOrbDiameter(densityProbe, scale, scale, targetDpi.ToString("0") + " DPI");
+                }
+            }
             Check(Math.Abs(app.Dot.ActualWidth - 88) < .1 && Math.Abs(app.Dot.ActualHeight - 88) < .1 && Placement.Rectangle(app.Dot) == bounds && app.Engine.ActiveTask == active && (active == null || (active.Status == status && active.DueAtUtc == deadline)),
                 fileName + ": LED animation preserves the 88-DIP window, task state and countdown deadline");
+        }
+
+        private static void CheckVisibleOrbDiameter(BitmapSource bitmap, double scaleX, double scaleY, string density)
+        {
+            int stride = bitmap.PixelWidth * 4;
+            var pixels = new byte[stride * bitmap.PixelHeight];
+            bitmap.CopyPixels(pixels, stride, 0);
+            int row = Math.Min(bitmap.PixelHeight - 1, (int)Math.Floor(44 * scaleY));
+            int left = -1, right = -1;
+            for (int x = 0; x < bitmap.PixelWidth; x++)
+            {
+                // The input window is almost transparent; only the opaque shell
+                // counts toward visible diameter, not its hit area or soft edge.
+                if (pixels[row * stride + x * 4 + 3] < 200) continue;
+                if (left < 0) left = x;
+                right = x;
+            }
+            double diameter = left < 0 ? 0 : (right - left + 1) / scaleX;
+            report.AppendLine("LED visible shell " + density + ": " + diameter.ToString("0.00") + " DIP");
+            Check(left >= 0 && Math.Abs(diameter - 73) <= 2,
+                "Visible orb diameter remains 73 DIP inside the 88-DIP input window at " + density);
         }
 
         private static void Capture(FrameworkElement element, string path)

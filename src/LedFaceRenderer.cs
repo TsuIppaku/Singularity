@@ -12,10 +12,12 @@ namespace Orbit
     {
         internal const double MaxGazeOffset = 21.2;
         private const double FaceSize = 88;
-        private const double SurfaceRadius = 36.5;
+        private const double OuterRadius = 36.5;
+        private const double SurfaceRadius = OuterRadius - 3.6;
         private const double EyeRadius = 10.7;
         private const double EyeRingRadius = 12.9;
-        private const double TimerRadius = 32;
+        private const double MarkerRadius = 1.95;
+        private const double TimerRadius = SurfaceRadius - 3.5;
         private static readonly Point Center = new Point(44, 44);
         private static readonly Rect Bounds = new Rect(0, 0, FaceSize, FaceSize);
         private static readonly Color Lilac = Color.FromRgb(177, 155, 211);
@@ -38,8 +40,9 @@ namespace Orbit
             double mix = Unit(timerMix), ratio = Unit(remainingRatio), open = Unit(openness);
             double gx = Finite(gazeOffset.X), gy = Finite(gazeOffset.Y);
             double gazeLength = Math.Sqrt(gx * gx + gy * gy);
-            if (gazeLength > MaxGazeOffset) { gx *= MaxGazeOffset / gazeLength; gy *= MaxGazeOffset / gazeLength; }
-            Point eyeCenter = new Point(Center.X + gx, Center.Y + gy);
+            // Fit the authored gaze and its orbit inside the inset canopy.
+            double gazeScale = (SurfaceRadius - EyeRingRadius - MarkerRadius - .45) / Math.Max(MaxGazeOffset, gazeLength);
+            Point eyeCenter = new Point(Center.X + gx * gazeScale, Center.Y + gy * gazeScale);
 
             dc.DrawImage(BaseLayer, Bounds);
             // Absolute 88-DIP mask coordinates prevent any moving shape from
@@ -87,7 +90,7 @@ namespace Orbit
                     Point bead = new Point(ringCenter.X + radius * Math.Cos(beadAngle),
                         ringCenter.Y + radius * Math.Sin(beadAngle));
                     dc.DrawEllipse(Solid(Blend(Color.FromRgb(224, 205, 248), Color.FromRgb(181, 239, 225), mix)),
-                        null, bead, 1.95, 1.95);
+                        null, bead, MarkerRadius, MarkerRadius);
                 }
 
                 if (mix > 0.15 && !String.IsNullOrEmpty(timeText))
@@ -157,8 +160,7 @@ namespace Orbit
             DrawingGroup drawing = new DrawingGroup();
             using (DrawingContext dc = drawing.Open())
             {
-                // A continuous physical bezel stays readable on either light or
-                // dark desktops. Its shallow bevel surrounds, not masks, the LEDs.
+                // Build the recessed bevel inward from the original silhouette.
                 LinearGradientBrush metal = new LinearGradientBrush();
                 metal.StartPoint = new Point(0, 0);
                 metal.EndPoint = new Point(1, 1);
@@ -169,14 +171,17 @@ namespace Orbit
                 metal.GradientStops.Add(new GradientStop(Color.FromRgb(47, 53, 66), 0.83));
                 metal.GradientStops.Add(new GradientStop(Color.FromRgb(82, 86, 101), 1));
                 metal.Freeze();
-                dc.DrawEllipse(metal, Stroke(Solid(Color.FromRgb(15, 19, 28)), 0.7), Center, 39.3, 39.3);
+                double edgeRadius = OuterRadius - .35;
+                dc.DrawEllipse(metal, Stroke(Solid(Color.FromRgb(15, 19, 28)), .7), Center, edgeRadius, edgeRadius);
                 LinearGradientBrush metalLip = new LinearGradientBrush(Color.FromRgb(151, 149, 171),
                     Color.FromRgb(65, 70, 86), new Point(0, 0), new Point(1, 1));
                 metalLip.Freeze();
-                dc.DrawEllipse(null, Stroke(metalLip, 0.55), Center, 38.9, 38.9);
+                double lipRadius = OuterRadius - .75;
+                dc.DrawEllipse(null, Stroke(metalLip, .55), Center, lipRadius, lipRadius);
                 // The dark inner channel separates the metal lip from the canopy.
+                double channelRadius = SurfaceRadius + .65;
                 dc.DrawEllipse(Solid(Color.FromRgb(11, 15, 22)),
-                    Stroke(Solid(Color.FromRgb(42, 46, 59)), 0.65), Center, 37.15, 37.15);
+                    Stroke(Solid(Color.FromRgb(42, 46, 59)), .65), Center, channelRadius, channelRadius);
                 RadialGradientBrush graphite = new RadialGradientBrush(Color.FromRgb(30, 33, 42), Color.FromRgb(19, 22, 29));
                 graphite.GradientOrigin = new Point(0.32, 0.22);
                 graphite.Center = new Point(0.5, 0.5);
@@ -221,7 +226,7 @@ namespace Orbit
                 edgeReflection.Freeze();
                 StreamGeometry canopyEdge = new StreamGeometry();
                 double start = -167 * Math.PI / 180, end = -62 * Math.PI / 180;
-                const double canopyRadius = 34.8;
+                const double canopyRadius = SurfaceRadius - 1.7;
                 using (StreamGeometryContext edge = canopyEdge.Open())
                 {
                     edge.BeginFigure(new Point(Center.X + canopyRadius * Math.Cos(start), Center.Y + canopyRadius * Math.Sin(start)), false, false);
