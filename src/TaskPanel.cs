@@ -226,7 +226,7 @@ namespace Orbit
                 System.Windows.Automation.AutomationProperties.SetName(row.Check, "完成 " + task.Name);
                 System.Windows.Automation.AutomationProperties.SetAutomationId(row.Check, "task-" + task.Id + "-check");
                 row.Check.Click += delegate { app.Act(delegate { app.Engine.ToggleChecklist(task.Id, app.Now()); }); };
-                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 15, "#E47B7E"));
+                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 17, "#E47B7E"));
                 row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
                 row.Actions.Children.Add(row.Delete);
                 row.Actions.Children.Add(row.Check);
@@ -244,7 +244,7 @@ namespace Orbit
                 row.Edit.Click += delegate { ToggleEdit(row); };
                 row.Restart = RowAction("重新开始", "task-" + task.Id + "-restart", new VectorIcon("restart", 15, "#AAA1B4"));
                 row.Restart.Click += delegate { app.RestartTask(task.Id); };
-                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 15, "#E47B7E"));
+                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 17, "#E47B7E"));
                 row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
                 row.Play = RowAction("开始或暂停 " + task.Name, "task-" + task.Id + "-play", null);
                 System.Windows.Automation.AutomationProperties.SetName(row.Play, "开始或暂停 " + task.Name);
@@ -263,7 +263,7 @@ namespace Orbit
             }
             else
             {
-                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 15, "#E47B7E"));
+                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 17, "#E47B7E"));
                 row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
                 Grid.SetColumn(row.Delete, 2);
                 grid.Children.Add(row.Delete);
@@ -402,7 +402,7 @@ namespace Orbit
                 }
                 if (row.Restart != null) row.Restart.Visibility = row.Hovered || row.Editing ? Visibility.Visible : Visibility.Hidden;
             }
-            if (row.Delete != null) row.Delete.Opacity = row.Hovered || row.Editing ? 1 : 0.72;
+            if (row.Delete != null) row.Delete.Opacity = row.Hovered || row.Editing ? 1 : 0.86;
         }
 
         private void WireDrag(RowView row)

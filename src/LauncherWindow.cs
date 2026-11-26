@@ -206,7 +206,7 @@ namespace Orbit
             double size = Math.Min(ActualWidth, ActualHeight);
             drawing.PushTransform(new TranslateTransform((ActualWidth - size) / 2, (ActualHeight - size) / 2));
             drawing.PushTransform(new ScaleTransform(size / 24, size / 24));
-            var pen = new Pen(ink, 1.7)
+            var pen = new Pen(ink, kind == "trash" ? 1.95 : 1.7)
             {
                 StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round,
                 DashCap = PenLineCap.Round, LineJoin = PenLineJoin.Round
@@ -249,7 +249,7 @@ namespace Orbit
             AddPath(paths, "check", "M5.75,12.25 L10,16.5 L18.25,7.75");
             AddPath(paths, "chevronDown", "M7,9.5 L12,14.5 L17,9.5");
             AddPath(paths, "chevronUp", "M7,14.5 L12,9.5 L17,14.5");
-            AddPath(paths, "trash", "M8,7 L16,7 M10,7 L10.8,4.5 L13.2,4.5 L14,7 M9.2,9 L9.8,19.25 L14.2,19.25 L14.8,9 M11,11.5 L11,16.5 M13,11.5 L13,16.5");
+            AddPath(paths, "trash", "M3.75,7.5 H20.25 M9,7.5 V5.25 Q9,4 10.25,4 H13.75 Q15,4 15,5.25 V7.5 M5.75,7.5 L6.5,17.75 Q6.7,20 8.75,20 H15.25 Q17.3,20 17.5,17.75 L18.25,7.5 M10,11.25 V16.25 M14,11.25 V16.25");
             AddPath(paths, "edit", "M5.5,17.8 L5.5,19.2 L6.9,19.2 L17.9,8.2 L16.5,6.8 Z M15.2,8.1 L16.6,9.5");
             AddPath(paths, "restart", "M18.25,10.4 C17.5,7.4 14.9,5.25 11.75,5.25 C8,5.25 5,8.25 5,12 C5,15.75 8,18.75 11.75,18.75 C14.6,18.75 17.05,17.05 18,14.65 M18.25,5.25 L18.25,10.4 L13.1,10.4");
             return paths;
