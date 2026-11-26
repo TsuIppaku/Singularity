@@ -94,7 +94,7 @@ namespace Orbit
         private readonly ClipboardDragExport clipboardDragExport;
         private readonly DispatcherTimer ticker;
         private readonly DispatcherTimer chimeTimer;
-        private readonly DispatcherTimer savePositionTimer;
+        private readonly DispatcherTimer savePreferencesTimer;
         private readonly DispatcherTimer toolHoverTimer;
         private readonly Stopwatch toolHoverClock = Stopwatch.StartNew();
         private Forms.NotifyIcon tray;
@@ -136,8 +136,8 @@ namespace Orbit
             ticker.Tick += delegate { Pulse(); };
             chimeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
             chimeTimer.Tick += delegate { if (Engine.AlertTask != null) Chime(); };
-            savePositionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-            savePositionTimer.Tick += delegate { savePositionTimer.Stop(); SavePosition(); };
+            savePreferencesTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            savePreferencesTimer.Tick += delegate { savePreferencesTimer.Stop(); SavePreferences(); };
             toolHoverTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(50) };
             toolHoverTimer.Tick += delegate { UpdateToolHover(); };
             Dot.MouseEnter += delegate
@@ -291,7 +291,12 @@ namespace Orbit
         internal void ClickDot()
         {
             if (Engine.AlertTask != null) Acknowledge();
-            else if (Launcher.IsVisible) HideTools();
+            else if (Panel.IsVisible || Utilities.IsVisible) HideTools();
+            else
+            {
+                string lastTool = Engine.State.LastToolMode;
+                ShowTool(lastTool == "notes" || lastTool == "clipboard" ? lastTool : "timer", false);
+            }
         }
 
         internal void ShowPanel()
@@ -461,6 +466,11 @@ namespace Orbit
                 Launcher.SetSelected(mode);
                 Refresh(true);
                 PresentTool(target, mode);
+                if (Engine.State.LastToolMode != mode)
+                {
+                    Engine.State.LastToolMode = mode;
+                    SchedulePreferenceSave();
+                }
             }
             finally { switchingTools = false; }
         }
@@ -670,11 +680,16 @@ namespace Orbit
         {
             RepositionTools();
             if (Reminder.IsVisible) Placement.Beside(Dot, Reminder);
-            savePositionTimer.Stop();
-            savePositionTimer.Start();
+            SchedulePreferenceSave();
         }
 
-        private void SavePosition()
+        private void SchedulePreferenceSave()
+        {
+            savePreferencesTimer.Stop();
+            savePreferencesTimer.Start();
+        }
+
+        private void SavePreferences()
         {
             var rect = Placement.Bounds(Dot);
             Engine.State.DotLeft = rect.Left;
@@ -809,9 +824,9 @@ namespace Orbit
             if (IsExiting) return;
             if (!Utilities.Flush()) { ShowUnsavedNotes(); return; }
             IsExiting = true;
-            ticker.Stop(); chimeTimer.Stop(); savePositionTimer.Stop(); toolHoverTimer.Stop();
+            ticker.Stop(); chimeTimer.Stop(); savePreferencesTimer.Stop(); toolHoverTimer.Stop();
             if (clipboardMonitor != null) clipboardMonitor.Dispose();
-            Engine.Tick(Now()); SavePosition();
+            Engine.Tick(Now()); SavePreferences();
             Utilities.Flush();
             sound.Dispose();
             if (signalRegistration != null) signalRegistration.Unregister(null);
@@ -851,7 +866,7 @@ namespace Orbit
             visual = new DotVisual(app) { AllowDrop = true }; Content = visual; Cursor = Cursors.Hand;
             AllowDrop = true;
             Motion.WireHover(visual); Motion.WirePress(visual);
-            tip = new ToolTip { Content = "Orbit · 悬停展开 · 点击收起\n拖动移动 · 右键菜单" }; ToolTip = tip;
+            tip = new ToolTip { Content = "Orbit · 悬停显示工具条\n单击打开上次工具 · 再点收起" }; ToolTip = tip;
             ToolTipService.SetInitialShowDelay(this, 450);
             fileDropFeedbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
             fileDropFeedbackTimer.Tick += delegate { fileDropFeedbackTimer.Stop(); visual.SetFileDropState(false, null, false); };
@@ -977,7 +992,7 @@ namespace Orbit
             visual.Refresh();
             var task = app.Engine.ActiveTask;
             var alert = app.Engine.AlertTask;
-            tip.Content = alert != null ? "时间到了 · " + alert.Name + "\n点击小点停止提醒" : task != null ? task.Name + "\n" + (task.Status == OrbitTaskStatus.Paused ? "已暂停 · " : "剩余 ") + Display.Time(task.RemainingSeconds) : "Orbit · 悬停展开 · 点击收起\n拖动移动 · 右键菜单";
+            tip.Content = alert != null ? "时间到了 · " + alert.Name + "\n点击小点停止提醒" : task != null ? task.Name + "\n" + (task.Status == OrbitTaskStatus.Paused ? "已暂停 · " : "剩余 ") + Display.Time(task.RemainingSeconds) : "Orbit · 悬停显示工具条\n单击打开上次工具 · 再点收起";
         }
     }
 

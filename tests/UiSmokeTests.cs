@@ -37,7 +37,9 @@ namespace Orbit
                 app.Dot.SetGazeForTest(new Point(10, -8));
                 CheckLedOrb(app, output, "00-led-idle-right-up.png", true);
                 app.HideTools(); app.ClickDot(); Pump();
-                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking the idle orb does not open tools");
+                Check(app.Launcher.IsVisible && app.Panel.IsVisible && !app.Utilities.IsVisible && app.Launcher.Selected == "timer", "First orb click falls back to the task timer when no previous tool exists");
+                app.ClickDot();
+                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking the orb with a child open immediately closes both tool layers");
                 app.PreviewLauncher(); Pump();
                 Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Hovering the orb reveals only the three-tool launcher");
                 var hoverDot = Placement.Bounds(app.Dot); var hoverBar = Placement.Bounds(app.Launcher);
@@ -45,8 +47,10 @@ namespace Orbit
                 app.DismissPreviewForTest(new Point((hoverDot.Left + hoverDot.Right) / 2.0, (hoverDot.Bottom + hoverBar.Top) / 2.0)); Pump();
                 app.DismissPreviewForTest(WindowCenter(app.Launcher)); Pump();
                 Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Pointer transit from the orb into the toolbar stays within the shared hover region");
+                app.ClickDot(); Pump();
+                Check(app.Launcher.IsVisible && app.Panel.IsVisible && !app.Utilities.IsVisible && app.Launcher.Selected == "timer", "Clicking with only the hover toolbar visible opens the remembered timer");
                 app.ClickDot();
-                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking an expanded orb immediately collapses the visible toolbar");
+                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "A second orb click immediately collapses the remembered timer and toolbar");
                 app.PreviewLauncher(); Pump();
                 Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Hovering again after an orb click reopens only the toolbar");
                 app.DismissPreviewForTest(OutsideToolsPoint(app)); Pump();
@@ -131,23 +135,26 @@ namespace Orbit
                 Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible && app.Engine.ActiveTask == timed && timed.Status == OrbitTaskStatus.Running && timed.DueAtUtc == resumedDeadline && timed.RemainingSeconds == resumedRemaining, "Clicking the orb immediately closes the toolbar and timer panel without pausing or changing the countdown");
                 app.PreviewLauncher(); Pump();
                 Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Hovering after a running timer was collapsed reopens only the toolbar");
-                Click(app.Launcher.ToolButton("timer")); Pump();
+                app.ClickDot(); Pump();
+                Check(app.Launcher.IsVisible && app.Panel.IsVisible && !app.Utilities.IsVisible && app.Launcher.Selected == "timer" && app.Engine.ActiveTask == timed && timed.Status == OrbitTaskStatus.Running && timed.DueAtUtc == resumedDeadline && timed.RemainingSeconds == resumedRemaining, "Clicking again reopens the running timer without restarting or changing its countdown");
                 app.DismissPreviewForTest(OutsideToolsPoint(app)); Pump();
                 Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible && app.Engine.ActiveTask == timed && timed.Status == OrbitTaskStatus.Running && timed.DueAtUtc == resumedDeadline, "Leaving the reopened toolbar and task panel closes all tool layers while the countdown continues");
                 now = now.AddHours(1); app.Pulse();
                 Check(app.Engine.AlertTask == timed && app.Alerting && app.Reminder.IsVisible && app.ChimeRequests == 1, "Task completes and reminds while all tools are collapsed");
                 app.ShowLauncher(); Pump();
                 app.ClickDot(); app.Pulse(); app.Pulse();
-                Check(!app.Alerting && app.Engine.AlertTask == null && app.ChimeRequests == 1 && app.Launcher.IsVisible, "Clicking the orb acknowledges an alert before collapsing tools, without re-triggering sound");
+                Check(!app.Alerting && app.Engine.AlertTask == null && app.ChimeRequests == 1 && app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking the orb acknowledges an alert before toggling tools, without opening a child or re-triggering sound");
                 app.ShowLauncher(); Click(app.Launcher.ToolButton("notes")); Pump();
                 Check(app.Utilities.IsVisible && app.Utilities.Mode == "notes" && !app.Panel.IsVisible, "Notepad opens in the same tool position");
                 Check(Math.Abs(app.Utilities.ActualWidth - 320) < 1, "Utility panel preserves its full width on first opening");
+                CheckRememberedUtility(app, "notes");
                 CheckHoverToolRegion(app, app.Utilities, "Notepad");
                 app.Utilities.NotesEditor.Text = "让一个人的小工具，帮到更多人。\n今天先做好这一件事。"; app.Utilities.Flush();
                 Check(File.ReadAllText(Path.Combine(output, "state", "notes.txt")).Contains("帮到更多人"), "Notepad persists text to its isolated local file");
                 CaptureGroup(app, Path.Combine(output, "04-notes.png"));
                 Click(app.Launcher.ToolButton("clipboard")); Pump();
                 Check(app.Utilities.Mode == "clipboard" && app.Launcher.Selected == "clipboard", "Clipboard button switches the utility panel");
+                CheckRememberedUtility(app, "clipboard");
                 Check(app.ClipboardHistory.Entries.Count == 0, "Desktop tests use an isolated clipboard history without reading the system clipboard");
                 CaptureGroup(app, Path.Combine(output, "05-clipboard.png"));
                 CheckClipboard(app, now, output);
@@ -272,6 +279,7 @@ namespace Orbit
             Check(app.ChimeRequests == chimes && app.Engine.AlertTask == null && !app.Alerting && Placement.Rectangle(app.Panel) == panelBounds && Placement.Rectangle(app.Launcher) == barBounds, "Completion and removal remain silent and keep the fixed panel and toolbar in place");
             var saved = new StateStore(Path.Combine(output, "state")).Load();
             Check(saved.Tasks.Select(task => task.Id).SequenceEqual(unfinished.Select(item => item.Task.Id)) && saved.ActiveTaskId == keepRunning.Id, "Confirmed bulk removal persists while retaining the active unfinished task");
+            Check(saved.LastToolMode == "timer" && saved.LastToolMode == app.Engine.State.LastToolMode, "Saving task state also preserves the last selected tool");
         }
 
         private static void CheckClipboard(AppController app, DateTimeOffset now, string output)
@@ -804,6 +812,18 @@ namespace Orbit
             Check(Placement.Rectangle(app.Panel) == aboveCard && Placement.Rectangle(app.Launcher) == beforeChild, "Adding tasks cannot flip the child or nudge the toolbar at screen edges");
             Placement.Move(app.Dot, dot.Left, area.Top + 45); app.RepositionTools(); Pump();
             Check(Placement.Rectangle(app.Panel).Top >= Placement.Rectangle(app.Launcher).Bottom && Math.Abs(app.Panel.ActualHeight - TaskPanel.PreferredHeight) < 1, "Dragging back to free space restores the normal panel height and downward position");
+        }
+
+        private static void CheckRememberedUtility(AppController app, string mode)
+        {
+            app.ClickDot();
+            Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, mode + ": an orb click immediately closes the selected utility and toolbar");
+            app.ClickDot(); Pump();
+            Check(app.Launcher.IsVisible && app.Utilities.IsVisible && !app.Panel.IsVisible && app.Utilities.Mode == mode && app.Launcher.Selected == mode && app.Engine.State.LastToolMode == mode, mode + ": the next orb click reopens the tool last selected through the toolbar");
+            app.ClickDot(); app.PreviewLauncher(); Pump();
+            Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, mode + ": hover alone still opens only the toolbar");
+            app.ClickDot(); Pump();
+            Check(app.Launcher.IsVisible && app.Utilities.IsVisible && !app.Panel.IsVisible && app.Utilities.Mode == mode && app.Launcher.Selected == mode, mode + ": clicking the hover-only toolbar state reopens the remembered utility");
         }
 
         private static void CheckHoverToolRegion(AppController app, Window tool, string label)

@@ -47,6 +47,7 @@ namespace Orbit
         // null means this installation has not yet asked the user about startup.
         // Once chosen, the preference remains stable across launches.
         [DataMember(Order = 6)] public bool? StartWithWindows { get; set; }
+        [DataMember(Order = 7, EmitDefaultValue = false)] public string LastToolMode { get; set; }
         [IgnoreDataMember] public bool WasRepaired { get; set; }
     }
 
