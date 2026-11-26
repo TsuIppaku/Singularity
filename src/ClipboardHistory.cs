@@ -29,7 +29,7 @@ namespace Orbit
     }
 
     /// <summary>
-    /// The three latest clipboard captures. This class never accesses the system
+    /// The three-entry clipboard history. This class never accesses the system
     /// clipboard: the monitor supplies captures and the UI requests promotions.
     /// </summary>
     internal sealed class ClipboardHistory
@@ -134,8 +134,8 @@ namespace Orbit
                 var next = new List<Record>(records);
                 if (!lockedRecord.Entry.IsFile)
                 {
-                    next.Insert(0, lockedRecord);
-                    if (next.Count > Capacity) next.RemoveAt(next.Count - 1);
+                    if (next.Count == Capacity) next.RemoveAt(next.Count - 1);
+                    next.Add(lockedRecord);
                 }
                 saved = Commit(next, null, confirmLockedReplacement);
             }

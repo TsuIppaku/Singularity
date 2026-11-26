@@ -29,11 +29,12 @@ internal static class ClipboardHistoryTests
             Run("unsafe cache paths cannot escape the image directory", PathSafety);
             Run("invalid image captures fail without side effects", InvalidImages);
             Run("pinned item is separate from normal rotation and replacement", PinnedRotation);
+            Run("unlock appends after recent records and persists that order", UnlockAppendOrder);
             Run("pinned state, preference and image ownership survive relaunch", PinnedPersistence);
             Run("failed pin changes preserve the old pin and setting", PinnedAtomicFailure);
             Run("ordinary files are independently snapshotted only in the pin", PinnedFileSnapshot);
             Run("file snapshot bounds and metadata paths protect existing data", PinnedFileBoundaries);
-            Console.WriteLine(failures == 0 ? "All 14 clipboard history test groups passed." : failures + " clipboard history test group(s) failed.");
+            Console.WriteLine(failures == 0 ? "All 15 clipboard history test groups passed." : failures + " clipboard history test group(s) failed.");
             return failures == 0 ? 0 : 1;
         }
         finally
@@ -269,14 +270,45 @@ internal static class ClipboardHistoryTests
             history.Entries.All(entry => entry.Id != pinned.Id), "Replacing a pin discards the old pin without returning it to history.");
         Assert(!history.Lock("missing") && history.LockedEntry == replacement, "Invalid replacement targets preserve the pin.");
         Assert(history.Add(TextEntry("six", 3)), "Fill normal history before unlocking.");
-        Assert(history.Unlock() && history.LockedEntry == null && history.Entries[0] == replacement &&
-            history.Entries.Select(entry => entry.Text).SequenceEqual(new[] { "four", "six", "five" }),
-            "Unlock restores text at the front and evicts only the oldest normal slot.");
+        Assert(history.Unlock() && history.LockedEntry == null && history.Entries[2] == replacement &&
+            history.Entries.Select(entry => entry.Text).SequenceEqual(new[] { "six", "five", "four" }),
+            "Unlock appends text after the retained recent records and still evicts the previous oldest normal slot.");
         int previousEvents = events;
         Assert(history.Unlock() && events == previousEvents, "Unlocking an empty pin is a no-op.");
         Assert(history.Lock(history.Entries[0].Id), "Relock a normal entry.");
         Assert(history.Add(new ClipboardEntry { Id = history.LockedEntry.Id, Text = "new external copy" }) && history.Entries[0].Id != history.LockedEntry.Id,
             "A new capture cannot reuse the pinned entry's identity.");
+    }
+
+    private static void UnlockAppendOrder()
+    {
+        for (int count = 0; count <= 3; count++)
+        {
+            string directory = DirectoryFor("unlock-append-" + count);
+            var history = new ClipboardHistory(directory);
+            Assert(history.LockDropped(TextEntry("returning pin", 100)), "Pin fixture should save.");
+            ClipboardEntry pinned = history.LockedEntry;
+            for (int index = 0; index < count; index++)
+                Assert(history.Add(TextEntry("recent-" + index, index)), "Existing recent records should save.");
+            ClipboardEntry[] before = history.Entries.ToArray();
+            string[] expected = before.Take(2).Select(entry => entry.Id).Concat(new[] { pinned.Id }).ToArray();
+            Assert(history.Unlock() && history.LockedEntry == null && history.Entries.Last() == pinned &&
+                history.Entries.Select(entry => entry.Id).SequenceEqual(expected),
+                "Unlock must append to an empty/partial/full list while retaining existing recent order: " + count);
+            if (count == 3)
+                Assert(history.Entries.All(entry => entry.Id != before[2].Id), "A full list still evicts its previous oldest record, not the unlocked item.");
+
+            history = new ClipboardHistory(directory);
+            Assert(history.LockedEntry == null && history.Entries.Select(entry => entry.Id).SequenceEqual(expected) &&
+                history.Entries.Last().CapturedAtUtc == pinned.CapturedAtUtc,
+                "Reopen preserves append order and the original capture timestamp without sorting the pin to the front: " + count);
+            Assert(history.Add(TextEntry("next capture", 101)), "New capture after unlock should save.");
+            string[] afterAdd = new[] { history.Entries[0].Id }.Concat(expected.Take(2)).ToArray();
+            Assert(history.Entries[0].Text == "next capture" && history.Entries.Select(entry => entry.Id).SequenceEqual(afterAdd),
+                "The next Add rotates the appended list using the normal three-record capacity: " + count);
+            Assert(new ClipboardHistory(directory).Entries.Select(entry => entry.Id).SequenceEqual(afterAdd),
+                "The next Add order survives a second reopen: " + count);
+        }
     }
 
     private static void PinnedPersistence()
@@ -296,8 +328,8 @@ internal static class ClipboardHistoryTests
         history = new ClipboardHistory(directory);
         Assert(history.LockedEntry.IsImage && !history.LockedEntry.IsFile && history.LockedEntry.ImagePng.SequenceEqual(png) &&
             history.LockedEntry.FileName == "固定图片.png" && !history.ConfirmLockedReplacement, "Image bytes, display name and preference survive relaunch.");
-        Assert(history.Unlock() && history.Entries[0].IsImage && File.Exists(firstImage), "Unlocking an image moves its owned cache to normal history without deleting it.");
-        Assert(history.Lock(history.Entries[0].Id) && history.LockDropped(TextEntry("replacement", 1)), "Replacing an image pin with text should save.");
+        Assert(history.Unlock() && history.Entries[0].Text == "normal" && history.Entries[1].IsImage && File.Exists(firstImage), "Unlocking an image appends its owned cache after recent history without deleting it.");
+        Assert(history.Lock(history.Entries[1].Id) && history.LockDropped(TextEntry("replacement", 1)), "Replacing an image pin with text should save.");
         Assert(!File.Exists(firstImage) && history.Entries.All(entry => entry.FileName != "固定图片.png"), "Replaced pinned image cache is cleaned only after commit, without restoring history.");
         Assert(history.SetConfirmLockedReplacement(true) && new ClipboardHistory(directory).ConfirmLockedReplacement, "Re-enabling confirmation should persist.");
     }
@@ -328,7 +360,8 @@ internal static class ClipboardHistoryTests
         Assert(File.ReadAllBytes(metadata).SequenceEqual(before) && Directory.GetFiles(cache, "*.png").Length == 1 && Directory.GetDirectories(cache).Length == 0,
             "Failed pin changes preserve exact metadata and old cache while cleaning only their newly created snapshots.");
         Assert(File.ReadAllBytes(source).SequenceEqual(new byte[] { 1, 2, 3, 4 }), "Snapshot failure must never touch the source file.");
-        Assert(history.Unlock() && history.Entries[0] == oldPin && history.LastError == null, "A failed change can be retried after the lock is released.");
+        Assert(history.Unlock() && history.Entries.Count == 2 && history.Entries[0] == normal && history.Entries[1] == oldPin && history.LastError == null,
+            "A failed change can be retried after the lock is released, appending the preserved pin after existing recent history.");
     }
 
     private static void PinnedFileSnapshot()

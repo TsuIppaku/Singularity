@@ -442,8 +442,10 @@ namespace Orbit
                 var immediate = app.ClipboardHistory.Entries[0];
                 Click(ById<Button>(app.Utilities, "LockSlot1")); Pump();
                 Check(!LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == immediate.Id && !app.ClipboardHistory.Entries.Any(entry => entry.Id == replacement.Id), "Disabling confirmation makes subsequent lock replacement immediate");
+                var textUnlockOrder = app.ClipboardHistory.Entries.Take(2).Select(entry => entry.Id).Concat(new[] { immediate.Id }).ToArray();
+                int copiesBeforeTextUnlock = copies;
                 Click(ById<Button>(app.Utilities, "UnlockSlot4")); Pump();
-                Check(app.ClipboardHistory.LockedEntry == null && ById<Border>(app.Utilities, "ClipboardCard4").Visibility != Visibility.Visible && app.ClipboardHistory.Entries.Count <= 3 && app.ClipboardHistory.Entries.Any(entry => entry.Text == immediate.Text), "Unlocking text hides the extra card and returns its content to recent history");
+                Check(app.ClipboardHistory.LockedEntry == null && ById<Border>(app.Utilities, "ClipboardCard4").Visibility != Visibility.Visible && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(textUnlockOrder) && app.ClipboardHistory.Entries.Last().Id == immediate.Id && app.ClipboardHistory.Entries.Last().Text == immediate.Text && copies == copiesBeforeTextUnlock, "Unlocking text appends its unchanged content after the existing recent entries without copying to the system clipboard");
 
                 string fixtures = Path.Combine(output, "locked-clipboard-fixtures");
                 Directory.CreateDirectory(fixtures);
@@ -486,8 +488,13 @@ namespace Orbit
                 app.Utilities.MoveClipboardGesture(dragMove, true); app.Utilities.EndClipboardGesture(true); Pump();
                 var imagePaths = payload.GetData(DataFormats.FileDrop) as string[];
                 Check(drags == 2 && imagePaths != null && imagePaths.Length == 1 && File.ReadAllBytes(imagePaths[0]).SequenceEqual(lockedImage.ImagePng) && app.ClipboardHistory.LockedEntry.Id == lockedImage.Id, "Locked image dragging exports its stored PNG while keeping the image pinned");
+                app.CaptureClipboardEntry(new ClipboardEntry { Text = "解锁前的新复制", CapturedAtUtc = now.AddSeconds(40) }); Pump();
+                Check(app.ClipboardHistory.Entries.Count == 3, "Image-unlock fixture has a full recent history before restoring the pin");
+                var imageUnlockOrder = app.ClipboardHistory.Entries.Take(2).Select(entry => entry.Id).Concat(new[] { lockedImage.Id }).ToArray();
+                int copiesBeforeImageUnlock = copies;
                 Click(ById<Button>(app.Utilities, "UnlockSlot4")); Pump();
-                Check(app.ClipboardHistory.LockedEntry == null && app.ClipboardHistory.Entries.Count <= 3 && app.ClipboardHistory.Entries.Any(entry => entry.IsImage && entry.FileName == lockedImage.FileName && entry.ImagePng.SequenceEqual(lockedImage.ImagePng)), "Unlocking an image returns its original content to normal recent history");
+                var restoredImage = app.ClipboardHistory.Entries.Last();
+                Check(app.ClipboardHistory.LockedEntry == null && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(imageUnlockOrder) && restoredImage.Id == lockedImage.Id && restoredImage.IsImage && restoredImage.FileName == lockedImage.FileName && restoredImage.ImagePng.SequenceEqual(lockedImage.ImagePng) && copies == copiesBeforeImageUnlock, "Unlocking an image preserves the two newest entries and appends the original image last without a clipboard write");
 
                 recentOrder = app.ClipboardHistory.Entries.Select(entry => entry.Id).ToArray();
                 Check(app.Utilities.TryLockDroppedFile(filePath), "A file can be pinned again after image unlock");
