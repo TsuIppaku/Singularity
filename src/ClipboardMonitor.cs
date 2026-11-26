@@ -7,6 +7,7 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security;
+using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
 using System.Windows.Interop;
@@ -27,7 +28,7 @@ namespace Orbit
         private const int WmClipboardUpdate = 0x031D;
         private static readonly int[] RetryDelays = { 25, 50, 100, 200, 350 };
         private static readonly string[] PngFormats = { "PNG", "image/png" };
-        private static readonly long ImageCooldownTicks = Stopwatch.Frequency * 120 / 1000;
+        private static readonly long ImageRepeatWindowTicks = Stopwatch.Frequency * 2;
         private readonly Window owner;
         private readonly Dispatcher dispatcher;
         private readonly Action<ClipboardEntry> captured;
@@ -49,7 +50,8 @@ namespace Orbit
         private uint handledSequence;
         private uint retrySequence;
         private int retryAttempt;
-        private long? lastImageCapture;
+        private string lastImagePixelKey;
+        private long lastImageSeenAt;
 
         internal ClipboardMonitor(Window owner, Action<ClipboardEntry> captured, Action<string> status)
             : this(owner, captured, status, GetClipboardSequenceNumber,
@@ -193,11 +195,14 @@ namespace Orbit
                 return;
             }
             // Keep application callback failures separate from codec failures.
-            if (entry != null && entry.IsImage)
+            if (entry != null && entry.ImagePixelKey != null)
             {
                 long now = Stopwatch.GetTimestamp();
-                if (lastImageCapture.HasValue && now - lastImageCapture.Value < ImageCooldownTicks) return;
-                lastImageCapture = now;
+                bool repeated = entry.ImagePixelKey == lastImagePixelKey &&
+                    now - lastImageSeenAt < ImageRepeatWindowTicks;
+                lastImagePixelKey = entry.ImagePixelKey;
+                lastImageSeenAt = now;
+                if (repeated) return;
             }
             if (entry != null) captured(entry);
             if (!String.IsNullOrEmpty(notice)) status(notice);
@@ -380,8 +385,41 @@ namespace Orbit
             {
                 Id = Guid.NewGuid().ToString("N"), ImagePng = png,
                 FileName = String.IsNullOrEmpty(name) ? "图片-" + now.ToLocalTime().ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + ".png" : name,
+                ImagePixelKey = String.IsNullOrEmpty(name) ? TryGetImagePixelKey(bitmap) : null,
                 PixelWidth = bitmap.PixelWidth, PixelHeight = bitmap.PixelHeight, CapturedAtUtc = now.ToUniversalTime()
             };
+        }
+
+        private static string TryGetImagePixelKey(BitmapSource bitmap)
+        {
+            try
+            {
+                // Compare identical image pixels independently of DPI, PNG
+                // metadata, or which clipboard format supplied the image.
+                BitmapSource pixels = bitmap.Format == PixelFormats.Bgra32 ? bitmap :
+                    new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0);
+                int stride = pixels.PixelWidth * 4;
+                int rowsPerBlock = Math.Min(pixels.PixelHeight, Math.Max(1, 65536 / stride));
+                var buffer = new byte[stride * rowsPerBlock];
+                using (SHA256 hash = SHA256.Create())
+                {
+                    for (int y = 0; y < pixels.PixelHeight; y += rowsPerBlock)
+                    {
+                        int rows = Math.Min(rowsPerBlock, pixels.PixelHeight - y);
+                        pixels.CopyPixels(new Int32Rect(0, y, pixels.PixelWidth, rows), buffer, stride, 0);
+                        hash.TransformBlock(buffer, 0, rows * stride, buffer, 0);
+                    }
+                    hash.TransformFinalBlock(buffer, 0, 0);
+                    return String.Format(CultureInfo.InvariantCulture, "{0}x{1}:{2}",
+                        pixels.PixelWidth, pixels.PixelHeight, Convert.ToBase64String(hash.Hash));
+                }
+            }
+            catch (Exception error)
+            {
+                if (!IsExpectedImageFailure(error) && !(error is CryptographicException)) throw;
+                // A comparison failure must not block a valid image capture.
+                return null;
+            }
         }
 
         private static BitmapSource DecodeEncodedImage(byte[] bytes, out bool animated)

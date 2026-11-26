@@ -34,6 +34,7 @@ namespace Orbit
                 TestInvalidImages();
                 TestStartupBaseline();
                 TestTransport();
+                TestImageRepublication();
                 Console.WriteLine("PASS " + checks + " clipboard monitor checks; all clipboard access used in-memory fixtures.");
                 foreach (string path in Directory.GetFiles(directory)) File.Delete(path);
                 Directory.Delete(directory);
@@ -206,18 +207,6 @@ namespace Orbit
                 transport.Sequence++; transport.Data = TextData("first new copy after startup");
                 monitor.RequestCapture(); Pump(30);
                 Check(captures.Count == 1 && captures[0].Text == "first new copy after startup", "first genuinely new copy after startup is captured");
-                transport.Sequence++; transport.Data = oldImage;
-                monitor.RequestCapture(); Pump(30);
-                transport.Sequence++;
-                monitor.RequestCapture(); Pump(30);
-                Check(captures.Count == 2 && captures[1].IsImage, "Only the first image is recorded during the short cooldown");
-                transport.Sequence++; transport.Data = TextData("text during image cooldown");
-                monitor.RequestCapture(); Pump(30);
-                Check(captures.Count == 3 && captures[2].Text == "text during image cooldown", "Image cooldown does not suppress text");
-                Pump(150);
-                transport.Sequence++; transport.Data = oldImage;
-                monitor.RequestCapture(); Pump(30);
-                Check(captures.Count == 4 && captures[3].IsImage, "Images are recorded again after the cooldown");
             }
 
             captures.Clear();
@@ -347,6 +336,60 @@ namespace Orbit
             Pump(100);
             Check(transport.ReadCount == beforeDisposedWait, "dispose cancels queued retry reads");
             Check(!pending.Copy(captures[0]), "disposed monitor rejects copy");
+            window.Close();
+        }
+
+        private static void TestImageRepublication()
+        {
+            byte[] pixels = { 0, 0, 200, 255, 0, 180, 0, 255, 160, 0, 0, 255, 30, 40, 50, 255 };
+            byte[] firstPng = Encode(Bitmap(pixels), new PngBitmapEncoder());
+            BitmapSource higherDpi = BitmapSource.Create(2, 2, 144, 144, PixelFormats.Bgra32, null, pixels, 8);
+            byte[] republishedPng = Encode(higherDpi, new PngBitmapEncoder());
+            Check(!firstPng.SequenceEqual(republishedPng) && Pixels(firstPng).SequenceEqual(Pixels(republishedPng)),
+                "republication fixture has identical pixels but different PNG encoding/DPI");
+            var firstData = new DataObject();
+            firstData.SetData("PNG", new MemoryStream(firstPng, false), false);
+            var republishedData = new DataObject();
+            republishedData.SetData("PNG", new MemoryStream(republishedPng, false), false);
+            byte[] differentPixels = (byte[])pixels.Clone();
+            differentPixels[2] = 10;
+            var differentData = new DataObject();
+            differentData.SetImage(Bitmap(differentPixels));
+
+            var window = new Window();
+            var captures = new List<ClipboardEntry>();
+            var transport = new FakeTransport { Sequence = 200, Data = TextData("existing before listener") };
+            using (var monitor = new ClipboardMonitor(window, captures.Add, null,
+                delegate { return transport.Sequence; }, transport.Read, transport.Write))
+            {
+                monitor.RegisterWithBaseline(delegate { return true; });
+                transport.Sequence++; transport.Data = firstData;
+                monitor.RequestCapture(); Pump(30);
+                int afterFirst = captures.Count;
+
+                // A screenshot publisher can update the same pixels after the
+                // old 120 ms gate, with a different PNG representation and no
+                // original filename. This must not create a second card.
+                Pump(250);
+                transport.Sequence++; transport.Data = republishedData;
+                monitor.RequestCapture(); Pump(30);
+                int afterRepublication = captures.Count;
+
+                // A genuinely different image must survive immediately, even
+                // when it has the same dimensions as the previous screenshot.
+                transport.Sequence++; transport.Data = differentData;
+                monitor.RequestCapture(); Pump(30);
+                bool differentSaved = captures.Any(entry => entry.IsImage && Pixels(entry.ImagePng).SequenceEqual(differentPixels));
+                transport.Sequence++; transport.Data = TextData("text after screenshot updates");
+                monitor.RequestCapture(); Pump(30);
+                bool textSaved = captures.Any(entry => !entry.IsImage && entry.Text == "text after screenshot updates");
+                Console.WriteLine("Image republication fixture: first=" + afterFirst + ", after same pixels=" + afterRepublication +
+                    ", immediate different image=" + differentSaved + ", following text=" + textSaved);
+                Check(afterFirst == 1, "first new screenshot is captured");
+                Check(afterRepublication == 1, "same unnamed screenshot republished after 250 ms with different PNG DPI creates only one entry");
+                Check(differentSaved, "different pixels with the same dimensions are captured immediately without a global cooldown");
+                Check(textSaved, "normal text is captured after image republication");
+            }
             window.Close();
         }
 

@@ -21,6 +21,8 @@ namespace Orbit
         public int PixelHeight { get; set; }
         public DateTimeOffset CapturedAtUtc { get; set; }
         public bool IsImage { get { return ImagePng != null && ImagePng.Length != 0; } }
+        // Only used while processing an unnamed image from the system clipboard.
+        internal string ImagePixelKey { get; set; }
     }
 
     /// <summary>
