@@ -855,8 +855,10 @@ namespace Orbit
             Title = "Orbit · 悬浮小点"; Width = 88; Height = 88;
             Display.ConfigureWindow(this);
             WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize; AllowsTransparency = true;
-            Background = Brushes.Transparent; ShowInTaskbar = false; ShowActivated = false; Topmost = true;
-            visual = new DotVisual(app); Content = visual; Cursor = Cursors.Hand;
+            // A layered window passes input through pixels with zero alpha.
+            // Keep its small fixed area hittable for native drags in every mode.
+            Background = Display.Brush("#02000000"); ShowInTaskbar = false; ShowActivated = false; Topmost = true;
+            visual = new DotVisual(app) { AllowDrop = true }; Content = visual; Cursor = Cursors.Hand;
             AllowDrop = true;
             Motion.WireHover(visual); Motion.WirePress(visual);
             tip = new ToolTip { Content = "Orbit · 点击开始，拖动移动，右键菜单" }; ToolTip = tip;
@@ -899,7 +901,7 @@ namespace Orbit
             ToolTipService.SetIsEnabled(this, false);
             fileDropFeedbackTimer.Stop();
             bool ownDrag = app.Utilities != null && app.Utilities.ClipboardGestureDragging;
-            bool accepted = !ownDrag && (allowedEffects & DragDropEffects.Copy) != 0 && SingleFilePath(data) != null;
+            bool accepted = !ownDrag && (allowedEffects & DragDropEffects.Copy) != 0 && ClipboardMonitor.CanReadDroppedContent(data);
             visual.SetFileDropState(accepted, null, false);
             return accepted;
         }
@@ -921,36 +923,13 @@ namespace Orbit
         internal bool ReceiveFileDrop(IDataObject data, DragDropEffects allowedEffects)
         {
             bool ownDrag = app.Utilities != null && app.Utilities.ClipboardGestureDragging;
-            string path = !ownDrag && (allowedEffects & DragDropEffects.Copy) != 0 ? SingleFilePath(data) : null;
             CancelFileDropPreview();
             if (ownDrag) return false;
-            bool accepted = path != null && app.Utilities.TryLockDroppedFile(path);
+            bool accepted = (allowedEffects & DragDropEffects.Copy) != 0 && app.Utilities.TryLockDroppedContent(data);
             string message = accepted ? (app.Utilities.ClipboardLockConfirmationPending ? "待确认" : "已锁定") : "未能锁定";
             visual.SetFileDropState(false, message, !accepted);
             fileDropFeedbackTimer.Start();
             return accepted;
-        }
-
-        private static string SingleFilePath(IDataObject data)
-        {
-            try
-            {
-                if (data == null || !data.GetDataPresent(DataFormats.FileDrop, false)) return null;
-                var paths = data.GetData(DataFormats.FileDrop, false) as string[];
-                if (paths == null || paths.Length != 1 || String.IsNullOrWhiteSpace(paths[0])) return null;
-                string path = paths[0];
-                // Reject UNC, drive-relative and stream paths before any file
-                // probe; the drop importer performs the complete validation.
-                char drive = Char.ToUpperInvariant(path[0]);
-                if (path.Length < 3 || drive < 'A' || drive > 'Z' || path[1] != ':' ||
-                    (path[2] != '\\' && path[2] != '/') || path.IndexOf(':', 2) >= 0) return null;
-                return File.Exists(path) ? path : null;
-            }
-            catch (Exception error)
-            {
-                if (error is OutOfMemoryException || error is StackOverflowException || error is AccessViolationException) throw;
-                return null;
-            }
         }
 
         private void OnDisplayChanged(object sender, EventArgs args)
@@ -1055,6 +1034,7 @@ namespace Orbit
         {
             var center = new Point(44, 44);
             double morph = Math.Max(0, Math.Min(1, (double)GetValue(FileDropMorphProperty)));
+            dc.DrawRectangle(Display.Brush("#02000000"), null, new Rect(0, 0, ActualWidth, ActualHeight));
             dc.DrawRoundedRectangle(Display.Brush("#13141A"), null, new Rect(9, 11, 70, 70), 35 - 18 * morph, 35 - 18 * morph);
             var shell = new LinearGradientBrush(Blend("#34353F", "#3A3328", morph), Blend("#202128", "#24211D", morph), new Point(0, 0), new Point(1, 1));
             var edge = new SolidColorBrush(Blend("#51505F", fileDropError ? "#BC897A" : "#CDA65D", morph));

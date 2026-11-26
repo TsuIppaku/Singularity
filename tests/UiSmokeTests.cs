@@ -153,6 +153,7 @@ namespace Orbit
                 Check(Inside(Placement.Bounds(app.Dot), Placement.WorkArea(app.Dot)), "Off-screen dot is recovered safely");
                 CheckTaskCompletionActions(app, now, output);
                 CheckOrbFileDropPreview(app, output);
+                CheckOrbTextDrops(app, output);
                 report.AppendLine("PASS: " + checks + " desktop integration checks. System clipboard untouched; audio suppressed.");
                 Environment.ExitCode = 0;
             }
@@ -537,6 +538,93 @@ namespace Orbit
             Click(ById<Button>(app.Utilities, "ConfirmLockedReplaceYes")); Pump();
             Check(app.ClipboardHistory.LockedEntry.IsImage && !LockedPromptVisible(app),
                 "Confirming the orb drop replaces the locked file with the dropped image");
+        }
+
+        private static void CheckOrbTextDrops(AppController app, string output)
+        {
+            var active = app.Engine.ActiveTask;
+            Check(active != null && active.Status == OrbitTaskStatus.Running, "Text-drop mode checks run with a live countdown");
+            DateTimeOffset? deadline = active.DueAtUtc;
+            var dotBounds = Placement.Rectangle(app.Dot);
+            var recentIds = app.ClipboardHistory.Entries.Select(entry => entry.Id).ToArray();
+            int taskCount = app.Engine.State.Tasks.Count;
+            string notes = app.Utilities.NotesEditor.Text;
+            var previousWriter = app.ClipboardWriterForTest;
+            int clipboardWrites = 0;
+            app.ClipboardWriterForTest = delegate { clipboardWrites++; return true; };
+            try
+            {
+                SetLockedConfirmation(app, false);
+                foreach (string mode in new[] { "bare", "launcher", "timer", "notes", "clipboard" })
+                {
+                    foreach (string format in new[] { DataFormats.UnicodeText, DataFormats.Text })
+                    {
+                        ShowOrbDropTestMode(app, mode);
+                        bool launcherVisible = app.Launcher.IsVisible, timerVisible = app.Panel.IsVisible, utilityVisible = app.Utilities.IsVisible;
+                        string utilityMode = app.Utilities.Mode;
+                        string originalPin = app.ClipboardHistory.LockedEntry.Id;
+                        string text = format == DataFormats.UnicodeText ? "奇点文本拖入 · " + mode + "\r\n保留换行与符号：✓" : "Orbit plain text / " + mode + "\r\nSecond line stays intact.";
+                        var data = new DataObject();
+                        // Test each advertised format itself, not WPF's automatic
+                        // conversion from one text format into the other.
+                        data.SetData(format, text, false);
+                        bool previewAccepted = app.Dot.PreviewFileDrop(data, DragDropEffects.Copy | DragDropEffects.Move);
+                        app.PreviewLauncher(); Pump();
+                        Check(previewAccepted && app.Dot.IsReceivingFileDrop && app.ClipboardHistory.LockedEntry.Id == originalPin && app.Launcher.IsVisible == launcherVisible && app.Panel.IsVisible == timerVisible && app.Utilities.IsVisible == utilityVisible && app.Utilities.Mode == utilityMode,
+                            mode + " / " + format + ": orb preview accepts text while preserving the current tool mode and pin");
+                        bool accepted = app.Dot.ReceiveFileDrop(data, DragDropEffects.Copy | DragDropEffects.Move);
+                        Pump();
+                        var locked = app.ClipboardHistory.LockedEntry;
+                        Check(accepted && !app.Dot.IsReceivingFileDrop && locked != null && !locked.IsImage && !locked.IsFile && locked.Text == text && locked.Id != originalPin && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentIds) && app.Launcher.IsVisible == launcherVisible && app.Panel.IsVisible == timerVisible && app.Utilities.IsVisible == utilityVisible && app.Utilities.Mode == utilityMode && Placement.Rectangle(app.Dot) == dotBounds,
+                            mode + " / " + format + ": orb drop locks the full text without opening another tool or changing recent rows");
+                    }
+                }
+                Check(Enumerable.Range(1, 4).All(slot => ById<Border>(app.Utilities, "ClipboardCard" + slot) != null && ById<Border>(app.Utilities, "ClipboardCard" + slot).Visibility == Visibility.Visible) && ById<Border>(app.Utilities, "ClipboardCard5") == null,
+                    "Repeated text drops retain three recent cards and exactly one separate locked card");
+
+                var bitmap = new BitmapImage();
+                using (var stream = File.OpenRead(Path.Combine(output, "locked-clipboard-fixtures", "锁定图像.png")))
+                {
+                    bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad; bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze();
+                }
+                var bitmapData = new DataObject(); bitmapData.SetData(DataFormats.Bitmap, bitmap, false);
+                Check(app.Dot.PreviewFileDrop(bitmapData, DragDropEffects.Copy) && app.Dot.ReceiveFileDrop(bitmapData, DragDropEffects.Copy) && app.ClipboardHistory.LockedEntry.IsImage && app.ClipboardHistory.LockedEntry.PixelWidth == 240 && app.ClipboardHistory.LockedEntry.PixelHeight == 140 && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentIds),
+                    "The same orb route accepts an in-memory bitmap without requiring a file-drop format");
+
+                SetLockedConfirmation(app, true);
+                var original = app.ClipboardHistory.LockedEntry;
+                ShowOrbDropTestMode(app, "notes");
+                var unicodeReplacement = new DataObject(); unicodeReplacement.SetData(DataFormats.UnicodeText, "待确认的中文文本\r\n取消后应保留旧锁定", false);
+                Check(app.Dot.PreviewFileDrop(unicodeReplacement, DragDropEffects.Copy) && app.Dot.ReceiveFileDrop(unicodeReplacement, DragDropEffects.Copy), "Notes mode accepts a Unicode replacement candidate through the orb");
+                Pump();
+                Check(app.Utilities.IsVisible && app.Utilities.Mode == "clipboard" && app.Utilities.ClipboardLockConfirmationPending && LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == original.Id && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentIds),
+                    "Text replacement opens confirmation only when required and retains the previous pin until a decision");
+                Click(ById<Button>(app.Utilities, "ConfirmLockedReplaceNo")); Pump();
+                Check(!app.Utilities.ClipboardLockConfirmationPending && !LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == original.Id && app.ClipboardHistory.LockedEntry.ImagePng.SequenceEqual(original.ImagePng) && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentIds),
+                    "Cancelling a Unicode text drop preserves the locked image bytes and all recent rows");
+
+                ShowOrbDropTestMode(app, "timer");
+                const string finalText = "Plain text replacement\r\nConfirmed through the orb.";
+                var plainReplacement = new DataObject(); plainReplacement.SetData(DataFormats.Text, finalText, false);
+                Check(app.Dot.PreviewFileDrop(plainReplacement, DragDropEffects.Copy) && app.Dot.ReceiveFileDrop(plainReplacement, DragDropEffects.Copy), "Timer mode accepts a plain-Text replacement candidate through the orb");
+                Pump();
+                Check(LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == original.Id, "Plain text replacement also waits for confirmation instead of overwriting the old pin");
+                Click(ById<Button>(app.Utilities, "ConfirmLockedReplaceYes")); Pump();
+                Check(!LockedPromptVisible(app) && !app.Utilities.ClipboardLockConfirmationPending && app.ClipboardHistory.LockedEntry.Text == finalText && app.ClipboardHistory.LockedEntry.Id != original.Id && !app.ClipboardHistory.Entries.Any(entry => entry.Id == original.Id) && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentIds),
+                    "Confirming plain text replacement discards only the prior pin and leaves recent-history rows intact");
+                app.Dot.CancelFileDropPreview(); app.Pulse(); Pump();
+                Check(clipboardWrites == 0 && app.Engine.State.Tasks.Count == taskCount && app.Engine.ActiveTask == active && active.Status == OrbitTaskStatus.Running && active.DueAtUtc == deadline && app.Utilities.NotesEditor.Text == notes && Placement.Rectangle(app.Dot) == dotBounds,
+                    "Text and bitmap drops across all modes leave system clipboard writes, task count, notes and the running countdown untouched");
+            }
+            finally { app.ClipboardWriterForTest = previousWriter; }
+        }
+
+        private static void ShowOrbDropTestMode(AppController app, string mode)
+        {
+            app.HideTools();
+            if (mode == "launcher") app.ShowLauncher();
+            else if (mode != "bare") app.ShowTool(mode, false);
+            Pump();
         }
 
         private static bool LockedPromptVisible(AppController app)

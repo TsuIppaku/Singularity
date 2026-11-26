@@ -32,6 +32,7 @@ namespace Orbit
                 TestDib();
                 TestFiles(directory);
                 TestDroppedFiles(directory);
+                TestDroppedContent(directory);
                 TestInvalidImages();
                 TestStartupBaseline();
                 TestTransport();
@@ -224,6 +225,78 @@ namespace Orbit
             string damaged = Path.Combine(directory, "explicit-broken.png");
             File.WriteAllText(damaged, "bad PNG");
             Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile(damaged, Now); }, "corrupt supported image is reported rather than shown as a false preview");
+        }
+
+        private static void TestDroppedContent(string directory)
+        {
+            string exactText = "  中文 Ω 🌱\r\nsecond line\n\t trailing space  ";
+            foreach (string format in new[] { DataFormats.UnicodeText, DataFormats.Text, DataFormats.StringFormat })
+            {
+                var textData = new FixtureData();
+                textData.SetData(format, exactText, false);
+                Check(ClipboardMonitor.CanReadDroppedContent(textData) && textData.GetDataCount == 0, "text hover checks format without reading content: " + format);
+                ClipboardEntry text = ClipboardMonitor.ReadDroppedContent(textData, Now);
+                Check(text.Text == exactText && !text.IsImage && !text.IsFile && text.CapturedAtUtc == Now,
+                    "explicit text drop preserves whitespace, Unicode, newlines and timestamp: " + format);
+            }
+            var priorityText = new FixtureData();
+            priorityText.SetData(DataFormats.UnicodeText, "Unicode wins", false);
+            priorityText.SetData(DataFormats.Text, "ANSI fallback", false);
+            priorityText.SetData(DataFormats.StringFormat, "managed fallback", false);
+            Check(ClipboardMonitor.ReadDroppedContent(priorityText, Now).Text == "Unicode wins", "Unicode text has priority over fallback string formats");
+            var whitespace = new FixtureData();
+            whitespace.SetData(DataFormats.Text, " \t\r\n ", false);
+            Check(ClipboardMonitor.ReadDroppedContent(whitespace, Now).Text == " \t\r\n ", "whitespace-only dropped text is not trimmed or discarded");
+            var excessive = new FixtureData();
+            excessive.SetData(DataFormats.StringFormat, new String('x', ClipboardMonitor.MaximumTextCharacters + 1), false);
+            Check(ClipboardMonitor.CanReadDroppedContent(excessive) && excessive.GetDataCount == 0, "hover does not load large text to decide acceptance");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedContent(excessive, Now); }, "all dropped text formats use the existing text size limit");
+
+            byte[] pixels = { 0, 0, 200, 128, 0, 180, 0, 255, 160, 0, 0, 0, 30, 40, 50, 255 };
+            byte[] png = Encode(Bitmap(pixels), new PngBitmapEncoder());
+            foreach (string format in new[] { "PNG", "image/png", DataFormats.Bitmap, DataFormats.Dib })
+            {
+                var imageData = new FixtureData();
+                object image = format == DataFormats.Bitmap ? (object)Bitmap(pixels) : new MemoryStream(format == DataFormats.Dib ? MakeDib(pixels, false, true) : png, false);
+                imageData.SetData(format, image, false);
+                imageData.SetData(DataFormats.UnicodeText, "image link text must not win", false);
+                Check(ClipboardMonitor.CanReadDroppedContent(imageData) && imageData.GetDataCount == 0, "image hover does not decode the payload: " + format);
+                ClipboardEntry result = ClipboardMonitor.ReadDroppedContent(imageData, Now);
+                Check(result.IsImage && !result.IsFile && result.PixelWidth == 2 && result.PixelHeight == 2 && Pixels(result.ImagePng)[3] == 128,
+                    "raw image drop wins over companion text and retains alpha: " + format);
+            }
+
+            string nativeFile = Path.Combine(directory, "拖入文件-优先.PDF");
+            File.WriteAllBytes(nativeFile, new byte[] { 37, 80, 68, 70, 0, 255 });
+            var mixedFile = new FixtureData();
+            mixedFile.SetData(DataFormats.FileDrop, new[] { nativeFile }, false);
+            mixedFile.SetData(DataFormats.UnicodeText, "path as text", false);
+            mixedFile.SetData(DataFormats.Bitmap, Bitmap(pixels), false);
+            ClipboardEntry fileResult = ClipboardMonitor.ReadDroppedContent(mixedFile, Now);
+            Check(ClipboardMonitor.CanReadDroppedContent(mixedFile) && fileResult.IsFile && fileResult.FileName == Path.GetFileName(nativeFile),
+                "real FileDrop keeps its native file instead of a shell icon or textual representation");
+            string nativeImage = Path.Combine(directory, "拖入有原名.png");
+            File.WriteAllBytes(nativeImage, png);
+            mixedFile.SetData(DataFormats.FileDrop, new StringCollection { nativeImage }, false);
+            ClipboardEntry named = ClipboardMonitor.ReadDroppedContent(mixedFile, Now);
+            Check(named.IsImage && named.FileName == "拖入有原名.png", "file-drop images keep their real filename while producing a preview");
+            var missingFile = new FixtureData();
+            missingFile.SetData(DataFormats.FileDrop, new[] { Path.Combine(directory, "does-not-exist.pdf") }, false);
+            Check(ClipboardMonitor.CanReadDroppedContent(missingFile), "hover accepts a lexical local path without probing whether it exists");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedContent(missingFile, Now); }, "drop performs strict file existence validation");
+            foreach (string invalidPath in new[] { @"\\invalid-host\share\file.pdf", "relative.txt", "C:relative.txt", nativeFile + ":stream" })
+            {
+                var invalid = new FixtureData();
+                invalid.SetData(DataFormats.FileDrop, new[] { invalidPath }, false);
+                Check(!ClipboardMonitor.CanReadDroppedContent(invalid), "hover rejects nonlocal/ambiguous file path without probing: " + invalidPath);
+                Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedContent(invalid, Now); }, "drop rejects nonlocal/ambiguous file paths");
+            }
+            mixedFile.SetData(DataFormats.FileDrop, new[] { nativeFile, nativeImage }, false);
+            Check(!ClipboardMonitor.CanReadDroppedContent(mixedFile), "multiple-file payload is not silently reduced to a different item");
+            Check(!ClipboardMonitor.CanReadDroppedContent(null) && !ClipboardMonitor.CanReadDroppedContent(new FixtureData()), "missing or unsupported drop data is rejected");
+            var plainOnly = new FixtureData();
+            plainOnly.SetData(DataFormats.Text, exactText, false);
+            Check(ClipboardMonitor.ReadData(plainOnly, Now) == null, "new explicit drop fallbacks do not alter automatic clipboard capture formats");
         }
 
         private static void TestInvalidImages()
@@ -544,7 +617,8 @@ namespace Orbit
         private sealed class FixtureData : IDataObject
         {
             private readonly Dictionary<string, object> values = new Dictionary<string, object>(StringComparer.Ordinal);
-            public object GetData(string format, bool autoConvert) { object value; values.TryGetValue(format, out value); return value; }
+            internal int GetDataCount;
+            public object GetData(string format, bool autoConvert) { GetDataCount++; object value; values.TryGetValue(format, out value); return value; }
             public object GetData(string format) { return GetData(format, false); }
             public object GetData(Type format) { return GetData(format.FullName, false); }
             public bool GetDataPresent(string format, bool autoConvert) { return values.ContainsKey(format); }

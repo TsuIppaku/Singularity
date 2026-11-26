@@ -14,6 +14,7 @@ using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using ShapePath = System.Windows.Shapes.Path;
 
 namespace Orbit
 {
@@ -22,6 +23,7 @@ namespace Orbit
     {
         private const int HistorySlotCount = 3;
         private const int ClipboardSlotsHeight = 240;
+        private const double LockConfirmationSize = 11;
         private readonly AppController app;
         private readonly string dataDirectory;
         private readonly TextBlock title;
@@ -168,16 +170,18 @@ namespace Orbit
             clipboardView.Children.Add(clipboardStatus);
             confirmLockedReplacement = new CheckBox
             {
-                Content = Label("每次替换锁定确认", 11, "#F0EDF3"),
-                FlowDirection = FlowDirection.RightToLeft,
-                VerticalContentAlignment = VerticalAlignment.Center,
+                Content = "替换锁定时确认",
+                FontSize = LockConfirmationSize,
+                Foreground = ColorBrush("#CFC2DF"),
                 HorizontalAlignment = HorizontalAlignment.Right,
                 Height = 20,
                 Margin = new Thickness(0, 4, 0, 0),
-                Cursor = Cursors.Hand
+                Cursor = Cursors.Hand,
+                SnapsToDevicePixels = true,
+                Template = MakeLockConfirmationTemplate()
             };
             AutomationProperties.SetAutomationId(confirmLockedReplacement, "ConfirmLockedReplacement");
-            AutomationProperties.SetName(confirmLockedReplacement, "每次替换锁定确认");
+            AutomationProperties.SetName(confirmLockedReplacement, (string)confirmLockedReplacement.Content);
             confirmLockedReplacement.Click += delegate
             {
                 if (app.ClipboardHistory.SetConfirmLockedReplacement(confirmLockedReplacement.IsChecked == true)) return;
@@ -267,7 +271,7 @@ namespace Orbit
                 app.ClipboardHistory.Changed -= OnClipboardChanged;
             };
             RefreshClipboardCards();
-            SetClipboardStatus("可把图片或文件拖到小球上锁定", false);
+            SetClipboardStatus("文字、图片、文件都可拖到小球锁定", false);
         }
 
         internal void OpenMode(string mode)
@@ -696,10 +700,25 @@ namespace Orbit
 
         internal bool TryLockDroppedFile(string path)
         {
+            return TryLockDrop(delegate { return ClipboardMonitor.ReadDroppedFile(path, app.Now()); });
+        }
+
+        internal bool TryLockDroppedContent(IDataObject data)
+        {
+            return TryLockDrop(delegate { return ClipboardMonitor.ReadDroppedContent(data, app.Now()); });
+        }
+
+        private bool TryLockDrop(Func<ClipboardEntry> read)
+        {
             try
             {
                 if (closed || app.IsExiting || clipboardDragging) return false;
-                ClipboardEntry dropped = ClipboardMonitor.ReadDroppedFile(path, app.Now());
+                ClipboardEntry dropped = read();
+                if (dropped == null)
+                {
+                    SetClipboardStatus("请拖入选中的文字、一张图片或一个本地文件。", true);
+                    return false;
+                }
                 return RequestClipboardLock(delegate { return app.ClipboardHistory.LockDropped(dropped); });
             }
             catch (Exception error)
@@ -1053,6 +1072,45 @@ namespace Orbit
             Style style = new Style(typeof(Button));
             style.Setters.Add(new Setter(Control.TemplateProperty, template));
             return style;
+        }
+
+        private static ControlTemplate MakeLockConfirmationTemplate()
+        {
+            var row = new FrameworkElementFactory(typeof(StackPanel));
+            row.SetValue(StackPanel.OrientationProperty, Orientation.Horizontal);
+            row.SetValue(Panel.BackgroundProperty, Brushes.Transparent);
+
+            var label = new FrameworkElementFactory(typeof(ContentPresenter));
+            label.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            row.AppendChild(label);
+
+            var mark = new FrameworkElementFactory(typeof(Grid));
+            mark.SetValue(FrameworkElement.WidthProperty, LockConfirmationSize);
+            mark.SetValue(FrameworkElement.HeightProperty, LockConfirmationSize);
+            mark.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            mark.SetValue(FrameworkElement.MarginProperty, new Thickness(6, 0, 0, 0));
+            row.AppendChild(mark);
+
+            var outlineGeometry = new GeometryGroup { FillRule = FillRule.EvenOdd };
+            outlineGeometry.Children.Add(new RectangleGeometry(new Rect(0, 0, LockConfirmationSize, LockConfirmationSize)));
+            outlineGeometry.Children.Add(new RectangleGeometry(new Rect(1, 1, LockConfirmationSize - 2, LockConfirmationSize - 2)));
+            outlineGeometry.Freeze();
+            var outline = new FrameworkElementFactory(typeof(ShapePath));
+            outline.SetValue(ShapePath.DataProperty, outlineGeometry);
+            outline.SetValue(ShapePath.FillProperty, new TemplateBindingExtension(Control.ForegroundProperty));
+            mark.AppendChild(outline);
+
+            var square = new FrameworkElementFactory(typeof(ShapePath), "CheckedSquare");
+            square.SetValue(ShapePath.DataProperty, new RectangleGeometry(new Rect(2, 2, LockConfirmationSize - 4, LockConfirmationSize - 4)));
+            square.SetValue(ShapePath.FillProperty, new TemplateBindingExtension(Control.ForegroundProperty));
+            square.SetValue(UIElement.VisibilityProperty, Visibility.Hidden);
+            mark.AppendChild(square);
+
+            var template = new ControlTemplate(typeof(CheckBox)) { VisualTree = row };
+            var isChecked = new Trigger { Property = ToggleButton.IsCheckedProperty, Value = true };
+            isChecked.Setters.Add(new Setter(UIElement.VisibilityProperty, Visibility.Visible, "CheckedSquare"));
+            template.Triggers.Add(isChecked);
+            return template;
         }
 
         private static ControlTemplate MakeEditorTemplate()

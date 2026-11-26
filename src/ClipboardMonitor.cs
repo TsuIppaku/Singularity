@@ -292,6 +292,78 @@ namespace Orbit
             return data;
         }
 
+        // A real file drop is authoritative: keep its filename and native bytes
+        // instead of a shell icon or textual path supplied alongside it. Without
+        // files, prefer image formats over Unicode/ANSI/managed string formats.
+        // Hover only checks advertised formats and file-path syntax, never disk.
+        internal static bool CanReadDroppedContent(IDataObject data)
+        {
+            if (data == null) return false;
+            try
+            {
+                if (data.GetDataPresent(DataFormats.FileDrop, false)) return SingleDroppedFilePath(data) != null;
+                return HasDroppedImage(data) || data.GetDataPresent(DataFormats.UnicodeText, false) ||
+                    data.GetDataPresent(DataFormats.Text, false) || data.GetDataPresent(DataFormats.StringFormat, false);
+            }
+            catch (Exception error)
+            {
+                if (!IsExpectedFailure(error)) throw;
+                return false;
+            }
+        }
+
+        internal static ClipboardEntry ReadDroppedContent(IDataObject data, DateTimeOffset now)
+        {
+            if (data == null) throw new InvalidDataException("没有可接收的拖入内容。");
+            try
+            {
+                if (data.GetDataPresent(DataFormats.FileDrop, false))
+                    return ReadDroppedFile(SingleDroppedFilePath(data), now);
+                if (HasDroppedImage(data))
+                {
+                    ClipboardEntry image = ReadData(data, now);
+                    if (image != null) return image;
+                    throw new InvalidDataException("拖入的图片暂时无法读取。");
+                }
+                foreach (string format in new[] { DataFormats.UnicodeText, DataFormats.Text, DataFormats.StringFormat })
+                {
+                    if (!data.GetDataPresent(format, false)) continue;
+                    string text = data.GetData(format, false) as string;
+                    if (String.IsNullOrEmpty(text)) continue;
+                    if (text.Length > MaximumTextCharacters) throw new InvalidDataException("文字超过 100 万字符，暂不处理。");
+                    return new ClipboardEntry { Id = Guid.NewGuid().ToString("N"), Text = text, CapturedAtUtc = now.ToUniversalTime() };
+                }
+                throw new InvalidDataException("请拖入文字、图片或单个本地文件。");
+            }
+            catch (InvalidDataException) { throw; }
+            catch (Exception error)
+            {
+                if (!IsExpectedFailure(error)) throw;
+                throw new InvalidDataException("拖入内容暂时无法读取，请重新拖入。", error);
+            }
+        }
+
+        private static bool HasDroppedImage(IDataObject data)
+        {
+            return data.GetDataPresent("PNG", false) || data.GetDataPresent("image/png", false) ||
+                data.GetDataPresent(DataFormats.Dib, false) || data.GetDataPresent(DataFormats.Bitmap, true);
+        }
+
+        private static string SingleDroppedFilePath(IDataObject data)
+        {
+            string[] files = FileNames(data.GetData(DataFormats.FileDrop, false));
+            if (files.Length != 1 || String.IsNullOrWhiteSpace(files[0]))
+                throw new InvalidDataException("请一次拖入一个本地文件。");
+            string path = files[0];
+            char drive = Char.ToUpperInvariant(path[0]);
+            if (path.Length < 3 || drive < 'A' || drive > 'Z' || path[1] != ':' ||
+                (path[2] != '\\' && path[2] != '/') || path.IndexOf(':', 2) >= 0)
+                throw new InvalidDataException("暂不支持网络路径、链接或相对路径，请拖入本地文件。");
+            // Pure path normalization performs no file-system probe. Strict
+            // existence, access, size and reparse checks happen only on Drop.
+            return Path.GetFullPath(path);
+        }
+
         // Explicit drop/pin input only. Automatic clipboard capture deliberately
         // continues to accept just text and readable images in ReadData below.
         internal static ClipboardEntry ReadDroppedFile(string path, DateTimeOffset now)
