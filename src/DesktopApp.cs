@@ -291,6 +291,7 @@ namespace Orbit
         internal void ClickDot()
         {
             if (Engine.AlertTask != null) Acknowledge();
+            else if (Launcher.IsVisible) HideTools();
         }
 
         internal void ShowPanel()
@@ -850,7 +851,7 @@ namespace Orbit
             visual = new DotVisual(app) { AllowDrop = true }; Content = visual; Cursor = Cursors.Hand;
             AllowDrop = true;
             Motion.WireHover(visual); Motion.WirePress(visual);
-            tip = new ToolTip { Content = "Orbit · 悬停打开工具，拖动移动，右键菜单" }; ToolTip = tip;
+            tip = new ToolTip { Content = "Orbit · 悬停展开 · 点击收起\n拖动移动 · 右键菜单" }; ToolTip = tip;
             ToolTipService.SetInitialShowDelay(this, 450);
             fileDropFeedbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
             fileDropFeedbackTimer.Tick += delegate { fileDropFeedbackTimer.Stop(); visual.SetFileDropState(false, null, false); };
@@ -976,7 +977,7 @@ namespace Orbit
             visual.Refresh();
             var task = app.Engine.ActiveTask;
             var alert = app.Engine.AlertTask;
-            tip.Content = alert != null ? "时间到了 · " + alert.Name + "\n点击小点停止提醒" : task != null ? task.Name + "\n" + (task.Status == OrbitTaskStatus.Paused ? "已暂停 · " : "剩余 ") + Display.Time(task.RemainingSeconds) : "Orbit · 悬停打开工具\n拖动移动 · 右键菜单";
+            tip.Content = alert != null ? "时间到了 · " + alert.Name + "\n点击小点停止提醒" : task != null ? task.Name + "\n" + (task.Status == OrbitTaskStatus.Paused ? "已暂停 · " : "剩余 ") + Display.Time(task.RemainingSeconds) : "Orbit · 悬停展开 · 点击收起\n拖动移动 · 右键菜单";
         }
     }
 
