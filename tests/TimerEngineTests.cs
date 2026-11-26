@@ -27,7 +27,7 @@ internal static class TimerEngineTests
         Run("reordering preserves active timers and task identity", ReorderPreservesTasks);
         Run("invalid additions do not mutate state", InvalidAdditions);
         Run("editing and restarting timed tasks", EditingAndRestarting);
-        Console.WriteLine(failures == 0 ? "All 14 timer test groups passed." : failures + " timer test group(s) failed.");
+        Console.WriteLine(failures == 0 ? "All 15 timer test groups passed." : failures + " timer test group(s) failed.");
         return failures == 0 ? 0 : 1;
     }
 
