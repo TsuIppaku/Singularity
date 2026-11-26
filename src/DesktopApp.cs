@@ -139,7 +139,10 @@ namespace Orbit
             savePositionTimer.Tick += delegate { savePositionTimer.Stop(); SavePosition(); };
             previewDismissTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(280) };
             previewDismissTimer.Tick += delegate { previewDismissTimer.Stop(); DismissPreviewIfAway(IsPointerInPreviewRegion()); };
-            Dot.MouseEnter += delegate { PreviewLauncher(); };
+            Dot.MouseEnter += delegate
+            {
+                if (Mouse.LeftButton != MouseButtonState.Pressed) PreviewLauncher();
+            };
             Dot.MouseLeave += delegate { SchedulePreviewDismissal(); };
             Launcher.MouseEnter += delegate { KeepPreviewOpen(); };
             Launcher.MouseLeave += delegate { SchedulePreviewDismissal(); };
@@ -188,13 +191,39 @@ namespace Orbit
         internal bool CopyClipboardEntry(string id)
         {
             var entry = ClipboardHistory.Entries.FirstOrDefault(item => item.Id == id);
-            if (entry == null) return false;
-            bool copied = IsTest
-                ? ClipboardWriterForTest != null && ClipboardWriterForTest(entry)
-                : clipboardMonitor != null && clipboardMonitor.Copy(entry);
+            bool isLocked = false;
+            if (entry == null)
+            {
+                entry = ClipboardHistory.LockedEntry;
+                if (entry == null || entry.Id != id) return false;
+                isLocked = true;
+            }
+            bool copied;
+            try
+            {
+                var output = entry;
+                if (entry.IsFile)
+                {
+                    // Explorer can paste this file even after the pin is replaced.
+                    output = new ClipboardEntry
+                    {
+                        Id = entry.Id, FileName = entry.FileName, CapturedAtUtc = entry.CapturedAtUtc,
+                        FilePath = clipboardDragExport.Prepare(entry).FilePath
+                    };
+                }
+                copied = IsTest ? ClipboardWriterForTest != null && ClipboardWriterForTest(output) :
+                    clipboardMonitor != null && clipboardMonitor.Copy(output);
+            }
+            catch (Exception error)
+            {
+                if (!IsClipboardTransferError(error)) throw;
+                Utilities.SetClipboardStatus("复制未完成：" + error.Message, true);
+                return false;
+            }
             if (!copied) return false;
-            bool saved = ClipboardHistory.Promote(id);
-            Utilities.SetClipboardStatus(saved ? "已复制 · 切回应用按 Ctrl+V 粘贴" : "已复制，但历史排序保存失败。", !saved);
+            bool saved = isLocked || ClipboardHistory.Promote(id);
+            string success = entry.IsFile ? "已复制 · 到文件夹按 Ctrl+V 粘贴" : "已复制 · 切回应用按 Ctrl+V 粘贴";
+            Utilities.SetClipboardStatus(saved ? success : "已复制，但历史排序保存失败。", !saved);
             return true;
         }
 
@@ -215,13 +244,18 @@ namespace Orbit
             }
             catch (Exception error)
             {
-                if (!(error is IOException || error is UnauthorizedAccessException || error is ArgumentException ||
-                    error is InvalidOperationException || error is ExternalException || error is NotSupportedException || error is FormatException ||
-                    error is System.Runtime.Serialization.SerializationException ||
-                    error is System.Security.SecurityException)) throw;
+                if (!IsClipboardTransferError(error)) throw;
                 Utilities.SetClipboardStatus("拖出未完成：" + error.Message, true);
                 return DragDropEffects.None;
             }
+        }
+
+        private static bool IsClipboardTransferError(Exception error)
+        {
+            return error is IOException || error is InvalidDataException || error is UnauthorizedAccessException || error is ArgumentException ||
+                error is InvalidOperationException || error is ExternalException || error is NotSupportedException ||
+                error is FormatException || error is System.Runtime.Serialization.SerializationException ||
+                error is System.Security.SecurityException;
         }
 
         internal void Pulse()
@@ -289,7 +323,7 @@ namespace Orbit
 
         internal void PreviewLauncher()
         {
-            if (IsExiting || Panel.IsVisible || Utilities.IsVisible) return;
+            if (IsExiting || Dot.IsReceivingFileDrop || Panel.IsVisible || Utilities.IsVisible) return;
             if (Launcher.IsVisible) { KeepPreviewOpen(); return; }
             toolsPinned = false;
             launcherPreview = true;
@@ -807,10 +841,13 @@ namespace Orbit
         private readonly AppController app;
         private readonly DotVisual visual;
         private readonly ToolTip tip;
+        private readonly DispatcherTimer fileDropFeedbackTimer;
         private Point pointerStart;
         private Placement.NativeRect dragBounds;
         private bool pressed;
         private bool dragged;
+
+        internal bool IsReceivingFileDrop { get; private set; }
 
         internal DotWindow(AppController app)
         {
@@ -820,9 +857,21 @@ namespace Orbit
             WindowStyle = WindowStyle.None; ResizeMode = ResizeMode.NoResize; AllowsTransparency = true;
             Background = Brushes.Transparent; ShowInTaskbar = false; ShowActivated = false; Topmost = true;
             visual = new DotVisual(app); Content = visual; Cursor = Cursors.Hand;
+            AllowDrop = true;
             Motion.WireHover(visual); Motion.WirePress(visual);
             tip = new ToolTip { Content = "Orbit · 点击开始，拖动移动，右键菜单" }; ToolTip = tip;
             ToolTipService.SetInitialShowDelay(this, 450);
+            fileDropFeedbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+            fileDropFeedbackTimer.Tick += delegate { fileDropFeedbackTimer.Stop(); visual.SetFileDropState(false, null, false); };
+            PreviewDragEnter += OnFileDragOver;
+            PreviewDragOver += OnFileDragOver;
+            PreviewDragLeave += delegate(object sender, DragEventArgs e) { if (IsReceivingFileDrop) CancelFileDropPreview(); e.Handled = true; };
+            PreviewDrop += OnFileDrop;
+            PreviewKeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.Key == Key.Escape && IsReceivingFileDrop) { CancelFileDropPreview(); e.Handled = true; }
+            };
+            IsVisibleChanged += delegate { if (!IsVisible) CancelFileDropPreview(); };
             SourceInitialized += delegate { NativeDesktop.PreventActivation(this); };
             MouseLeftButtonDown += OnDown; MouseMove += OnMove; MouseLeftButtonUp += OnUp;
             LostMouseCapture += delegate { pressed = false; };
@@ -830,7 +879,78 @@ namespace Orbit
             LocationChanged += delegate { if (IsLoaded) app.Moved(); };
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs e) { if (!app.IsExiting) { e.Cancel = true; Dispatcher.BeginInvoke(new Action(app.Exit)); } };
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
-            Closed += delegate { Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplayChanged; };
+            Closed += delegate { CancelFileDropPreview(); Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplayChanged; };
+        }
+
+        private void OnFileDragOver(object sender, DragEventArgs e)
+        {
+            e.Effects = PreviewFileDrop(e.Data, e.AllowedEffects) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        internal bool PreviewFileDrop(IDataObject data, DragDropEffects allowedEffects)
+        {
+            // The guard also covers rejected and Orbit-originated OLE drags, so
+            // none of them can trigger the normal mouse-hover launcher preview.
+            IsReceivingFileDrop = true;
+            pressed = false;
+            if (IsMouseCaptured) ReleaseMouseCapture();
+            tip.IsOpen = false;
+            ToolTipService.SetIsEnabled(this, false);
+            fileDropFeedbackTimer.Stop();
+            bool ownDrag = app.Utilities != null && app.Utilities.ClipboardGestureDragging;
+            bool accepted = !ownDrag && (allowedEffects & DragDropEffects.Copy) != 0 && SingleFilePath(data) != null;
+            visual.SetFileDropState(accepted, null, false);
+            return accepted;
+        }
+
+        internal void CancelFileDropPreview()
+        {
+            IsReceivingFileDrop = false;
+            fileDropFeedbackTimer.Stop();
+            ToolTipService.SetIsEnabled(this, true);
+            visual.SetFileDropState(false, null, false);
+        }
+
+        private void OnFileDrop(object sender, DragEventArgs e)
+        {
+            e.Effects = ReceiveFileDrop(e.Data, e.AllowedEffects) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Handled = true;
+        }
+
+        internal bool ReceiveFileDrop(IDataObject data, DragDropEffects allowedEffects)
+        {
+            bool ownDrag = app.Utilities != null && app.Utilities.ClipboardGestureDragging;
+            string path = !ownDrag && (allowedEffects & DragDropEffects.Copy) != 0 ? SingleFilePath(data) : null;
+            CancelFileDropPreview();
+            if (ownDrag) return false;
+            bool accepted = path != null && app.Utilities.TryLockDroppedFile(path);
+            string message = accepted ? (app.Utilities.ClipboardLockConfirmationPending ? "待确认" : "已锁定") : "未能锁定";
+            visual.SetFileDropState(false, message, !accepted);
+            fileDropFeedbackTimer.Start();
+            return accepted;
+        }
+
+        private static string SingleFilePath(IDataObject data)
+        {
+            try
+            {
+                if (data == null || !data.GetDataPresent(DataFormats.FileDrop, false)) return null;
+                var paths = data.GetData(DataFormats.FileDrop, false) as string[];
+                if (paths == null || paths.Length != 1 || String.IsNullOrWhiteSpace(paths[0])) return null;
+                string path = paths[0];
+                // Reject UNC, drive-relative and stream paths before any file
+                // probe; the drop importer performs the complete validation.
+                char drive = Char.ToUpperInvariant(path[0]);
+                if (path.Length < 3 || drive < 'A' || drive > 'Z' || path[1] != ':' ||
+                    (path[2] != '\\' && path[2] != '/') || path.IndexOf(':', 2) >= 0) return null;
+                return File.Exists(path) ? path : null;
+            }
+            catch (Exception error)
+            {
+                if (error is OutOfMemoryException || error is StackOverflowException || error is AccessViolationException) throw;
+                return null;
+            }
         }
 
         private void OnDisplayChanged(object sender, EventArgs args)
@@ -840,6 +960,7 @@ namespace Orbit
 
         private void OnDown(object sender, MouseButtonEventArgs e)
         {
+            if (IsReceivingFileDrop) { e.Handled = true; return; }
             tip.IsOpen = false;
             pressed = true; dragged = false; pointerStart = NativeDesktop.CursorPosition; dragBounds = Placement.Bounds(this);
             CaptureMouse(); e.Handled = true;
@@ -874,9 +995,15 @@ namespace Orbit
 
     internal sealed class DotVisual : FrameworkElement
     {
+        private static readonly DependencyProperty FileDropMorphProperty = DependencyProperty.Register(
+            "FileDropMorph", typeof(double), typeof(DotVisual), new FrameworkPropertyMetadata(0.0, FrameworkPropertyMetadataOptions.AffectsRender));
         private readonly AppController app;
         private readonly VisualCollection children;
         private readonly TextBlock countdown;
+        private readonly TextBlock fileDropLabel;
+        private bool fileDropReady;
+        private string fileDropFeedback;
+        private bool fileDropError;
         internal DotVisual(AppController app)
         {
             this.app = app; Width = 88; Height = 88; UseLayoutRounding = true; SnapsToDevicePixels = true;
@@ -884,12 +1011,38 @@ namespace Orbit
             TextOptions.SetTextFormattingMode(countdown, TextFormattingMode.Display);
             TextOptions.SetTextRenderingMode(countdown, TextRenderingMode.Grayscale);
             System.Windows.Documents.Typography.SetNumeralAlignment(countdown, FontNumeralAlignment.Tabular);
-            children = new VisualCollection(this); children.Add(countdown);
+            fileDropLabel = new TextBlock
+            {
+                FontFamily = new FontFamily("Segoe UI, Microsoft YaHei UI"), FontWeight = FontWeights.Medium, FontSize = 11,
+                Foreground = Display.Brush("#F0D49A"), TextAlignment = TextAlignment.Center, LineHeight = 16,
+                LineStackingStrategy = LineStackingStrategy.BlockLineHeight, Visibility = Visibility.Collapsed,
+                IsHitTestVisible = false, SnapsToDevicePixels = true, UseLayoutRounding = true
+            };
+            TextOptions.SetTextFormattingMode(fileDropLabel, TextFormattingMode.Display);
+            TextOptions.SetTextRenderingMode(fileDropLabel, TextRenderingMode.Grayscale);
+            children = new VisualCollection(this); children.Add(countdown); children.Add(fileDropLabel);
         }
         protected override int VisualChildrenCount { get { return children.Count; } }
         protected override Visual GetVisualChild(int index) { return children[index]; }
-        protected override Size MeasureOverride(Size available) { countdown.Measure(new Size(68, 28)); return new Size(88, 88); }
-        protected override Size ArrangeOverride(Size finalSize) { countdown.Arrange(new Rect(10, 30, 68, 28)); return finalSize; }
+        protected override Size MeasureOverride(Size available) { countdown.Measure(new Size(68, 28)); fileDropLabel.Measure(new Size(66, 34)); return new Size(88, 88); }
+        protected override Size ArrangeOverride(Size finalSize) { countdown.Arrange(new Rect(10, 30, 68, 28)); fileDropLabel.Arrange(new Rect(11, 28, 66, 34)); return finalSize; }
+        internal void SetFileDropState(bool ready, string feedback, bool error)
+        {
+            if (fileDropReady == ready && fileDropFeedback == feedback && fileDropError == error) return;
+            fileDropReady = ready;
+            fileDropFeedback = feedback;
+            fileDropError = error;
+            bool showing = ready || feedback != null;
+            fileDropLabel.Text = ready ? "松开放入\n锁定槽" : feedback == null ? String.Empty : feedback + (error ? "\n请重试" : "\n锁定槽");
+            fileDropLabel.Foreground = Display.Brush(error ? "#E9B4A8" : "#F0D49A");
+            fileDropLabel.Visibility = showing ? Visibility.Visible : Visibility.Collapsed;
+            countdown.Visibility = showing ? Visibility.Collapsed : Visibility.Visible;
+            BeginAnimation(FileDropMorphProperty, new DoubleAnimation(showing ? 1 : 0, TimeSpan.FromMilliseconds(140))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            });
+            InvalidateVisual();
+        }
         internal void Refresh()
         {
             var task = app.Engine.ActiveTask;
@@ -901,9 +1054,12 @@ namespace Orbit
         protected override void OnRender(DrawingContext dc)
         {
             var center = new Point(44, 44);
-            dc.DrawEllipse(Display.Brush("#13141A"), null, new Point(44, 46), 35, 35);
-            var shell = new LinearGradientBrush((Color)ColorConverter.ConvertFromString("#34353F"), (Color)ColorConverter.ConvertFromString("#202128"), new Point(0, 0), new Point(1, 1));
-            dc.DrawEllipse(shell, new Pen(Display.Brush("#51505F"), 1), center, 34, 34);
+            double morph = Math.Max(0, Math.Min(1, (double)GetValue(FileDropMorphProperty)));
+            dc.DrawRoundedRectangle(Display.Brush("#13141A"), null, new Rect(9, 11, 70, 70), 35 - 18 * morph, 35 - 18 * morph);
+            var shell = new LinearGradientBrush(Blend("#34353F", "#3A3328", morph), Blend("#202128", "#24211D", morph), new Point(0, 0), new Point(1, 1));
+            var edge = new SolidColorBrush(Blend("#51505F", fileDropError ? "#BC897A" : "#CDA65D", morph));
+            dc.DrawRoundedRectangle(shell, new Pen(edge, 1 + .35 * morph), new Rect(10, 10, 68, 68), 34 - 18 * morph, 34 - 18 * morph);
+            if (fileDropReady || fileDropFeedback != null) return;
             var task = app.Engine.ActiveTask;
             if (app.Engine.AlertTask != null)
             {
@@ -925,6 +1081,12 @@ namespace Orbit
                 dc.DrawEllipse(Display.Brush("#E78A7A"), null, center, 5, 5);
                 dc.DrawEllipse(Display.Brush("#DDDAE3"), null, new Point(56, 35), 2.4, 2.4);
             }
+        }
+
+        private static Color Blend(string from, string to, double ratio)
+        {
+            Color a = (Color)ColorConverter.ConvertFromString(from), b = (Color)ColorConverter.ConvertFromString(to);
+            return Color.FromRgb((byte)(a.R + (b.R - a.R) * ratio), (byte)(a.G + (b.G - a.G) * ratio), (byte)(a.B + (b.B - a.B) * ratio));
         }
 
         private static void DrawArc(DrawingContext dc, Point c, double radius, double ratio, string color)

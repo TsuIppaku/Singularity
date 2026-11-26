@@ -20,16 +20,23 @@ namespace Orbit
     /// <summary>Local notes and a compact view of the shared automatic clipboard history.</summary>
     internal sealed class UtilityPanel : Window
     {
+        private const int HistorySlotCount = 3;
+        private const int ClipboardSlotsHeight = 240;
         private readonly AppController app;
         private readonly string dataDirectory;
         private readonly TextBlock title;
         private readonly ScrollViewer body;
         private readonly StackPanel notesView;
         private readonly StackPanel clipboardView;
+        private readonly Grid clipboardSlots;
         private readonly TextBox notesEditor;
         private readonly TextBlock notesStatus;
         private readonly TextBlock clipboardStatus;
-        private readonly ClipboardSlotView[] clipboardCards = new ClipboardSlotView[3];
+        private readonly TextBlock clipboardHint;
+        private readonly CheckBox confirmLockedReplacement;
+        private readonly Grid lockedReplacementPrompt;
+        private readonly Button cancelLockedReplacement;
+        private readonly ClipboardSlotView[] clipboardCards = new ClipboardSlotView[HistorySlotCount + 1];
         private readonly DispatcherTimer saveTimer;
         private bool notesLoaded;
         private bool changingNotes;
@@ -42,11 +49,13 @@ namespace Orbit
         private bool releasingClipboardCapture;
         private bool suppressClipboardMouseUp;
         private bool clipboardRefreshDeferred;
+        private Func<bool> pendingLockedReplacement;
 
         internal string Mode { get; private set; }
         internal TextBox NotesEditor { get { return notesEditor; } }
         internal bool ClipboardGesturePending { get { return clipboardGesture != null && !clipboardDragging; } }
         internal bool ClipboardGestureDragging { get { return clipboardDragging; } }
+        internal bool ClipboardLockConfirmationPending { get { return pendingLockedReplacement != null; } }
 
         internal UtilityPanel(AppController app, string dataDirectory)
         {
@@ -133,11 +142,23 @@ namespace Orbit
             modes.Children.Add(notesView);
 
             clipboardView = new StackPanel { Visibility = Visibility.Collapsed };
-            TextBlock hint = Label("最近 3 项 · 单击复制 · 拖出使用", 12, "#ABA6B8");
-            hint.Height = 18;
-            hint.Margin = new Thickness(0, 0, 0, 8);
-            clipboardView.Children.Add(hint);
-            for (int i = 0; i < clipboardCards.Length; i++) clipboardView.Children.Add(MakeClipboardCard(i));
+            clipboardHint = Label("最近 3 项 · 单击复制 · 拖出使用", 12, "#ABA6B8");
+            clipboardHint.Height = 18;
+            clipboardHint.Margin = new Thickness(0, 0, 0, 8);
+            AutomationProperties.SetAutomationId(clipboardHint, "ClipboardDropHint");
+            clipboardView.Children.Add(clipboardHint);
+            // A fixed grid gives the rounded screen pixels to the cards and
+            // gaps without resizing the window when the extra row appears.
+            clipboardSlots = new Grid { Height = ClipboardSlotsHeight };
+            for (int i = 0; i < clipboardCards.Length; i++)
+            {
+                if (i != 0) clipboardSlots.RowDefinitions.Add(new RowDefinition { Height = new GridLength(6) });
+                clipboardSlots.RowDefinitions.Add(new RowDefinition());
+                var slot = MakeClipboardCard(i);
+                Grid.SetRow(slot, i * 2);
+                clipboardSlots.Children.Add(slot);
+            }
+            clipboardView.Children.Add(clipboardSlots);
             clipboardStatus = StatusLabel();
             clipboardStatus.Height = 16;
             clipboardStatus.TextWrapping = TextWrapping.NoWrap;
@@ -145,7 +166,64 @@ namespace Orbit
             clipboardStatus.Margin = new Thickness(1, 6, 1, 0);
             AutomationProperties.SetAutomationId(clipboardStatus, "ClipboardStatus");
             clipboardView.Children.Add(clipboardStatus);
+            confirmLockedReplacement = new CheckBox
+            {
+                Content = Label("每次替换锁定确认", 11, "#F0EDF3"),
+                FlowDirection = FlowDirection.RightToLeft,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Height = 20,
+                Margin = new Thickness(0, 4, 0, 0),
+                Cursor = Cursors.Hand
+            };
+            AutomationProperties.SetAutomationId(confirmLockedReplacement, "ConfirmLockedReplacement");
+            AutomationProperties.SetName(confirmLockedReplacement, "每次替换锁定确认");
+            confirmLockedReplacement.Click += delegate
+            {
+                if (app.ClipboardHistory.SetConfirmLockedReplacement(confirmLockedReplacement.IsChecked == true)) return;
+                confirmLockedReplacement.IsChecked = app.ClipboardHistory.ConfirmLockedReplacement;
+                SetClipboardStatus(app.ClipboardHistory.LastError ?? "确认设置未能保存。", true);
+            };
+            clipboardView.Children.Add(confirmLockedReplacement);
             modes.Children.Add(clipboardView);
+
+            lockedReplacementPrompt = new Grid { Visibility = Visibility.Collapsed, Background = ColorBrush("#C01C1D24") };
+            KeyboardNavigation.SetTabNavigation(lockedReplacementPrompt, KeyboardNavigationMode.Cycle);
+            AutomationProperties.SetAutomationId(lockedReplacementPrompt, "LockedReplacementPrompt");
+            var replacementCard = new Border
+            {
+                Background = ColorBrush("#262730"), BorderBrush = ColorBrush("#625441"), BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12), Padding = new Thickness(16),
+                HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+                MaxWidth = 268
+            };
+            var replacementContent = new StackPanel();
+            var replacementTitle = Label("替换已锁定内容？", 13, "#F0EDF3");
+            replacementTitle.FontWeight = FontWeights.SemiBold;
+            replacementContent.Children.Add(replacementTitle);
+            var replacementDetail = Label("替换后，原锁定内容会从剪贴板移除。", 11, "#C4BACB");
+            replacementDetail.TextWrapping = TextWrapping.Wrap;
+            replacementDetail.Margin = new Thickness(0, 5, 0, 12);
+            replacementContent.Children.Add(replacementDetail);
+            var replacementActions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+            cancelLockedReplacement = SmallButton("取消", "保留原锁定内容", delegate { CompleteLockedReplacement(false); });
+            cancelLockedReplacement.MinWidth = 48;
+            cancelLockedReplacement.Height = 27;
+            AutomationProperties.SetAutomationId(cancelLockedReplacement, "ConfirmLockedReplaceNo");
+            replacementActions.Children.Add(cancelLockedReplacement);
+            var replace = SmallButton("替换", "替换已锁定内容", delegate { CompleteLockedReplacement(true); });
+            replace.MinWidth = 48;
+            replace.Height = 27;
+            replace.Margin = new Thickness(7, 0, 0, 0);
+            replace.Background = ColorBrush("#624C32");
+            replace.Foreground = ColorBrush("#FFF2D7");
+            AutomationProperties.SetAutomationId(replace, "ConfirmLockedReplaceYes");
+            replacementActions.Children.Add(replace);
+            replacementContent.Children.Add(replacementActions);
+            replacementCard.Child = replacementContent;
+            lockedReplacementPrompt.Children.Add(replacementCard);
+            Grid.SetRowSpan(lockedReplacementPrompt, 2);
+            layout.Children.Add(lockedReplacementPrompt);
 
             saveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             saveTimer.Tick += delegate { saveTimer.Stop(); SaveNotes(); };
@@ -161,7 +239,8 @@ namespace Orbit
             {
                 if (e.Key == Key.Escape)
                 {
-                    if (clipboardGesture != null || clipboardDragging) EndClipboardGesture(false);
+                    if (pendingLockedReplacement != null) CompleteLockedReplacement(false);
+                    else if (clipboardGesture != null || clipboardDragging) EndClipboardGesture(false);
                     else if (Flush()) Hide();
                     e.Handled = true;
                 }
@@ -175,7 +254,7 @@ namespace Orbit
             };
             IsVisibleChanged += delegate
             {
-                if (!IsVisible) { EndClipboardGesture(false); Flush(); }
+                if (!IsVisible) { EndClipboardGesture(false); ClearLockedReplacement(); Flush(); }
                 else FocusNotesWhenReady();
             };
             SizeChanged += delegate { if (IsVisible) app.RepositionTools(); };
@@ -188,13 +267,17 @@ namespace Orbit
                 app.ClipboardHistory.Changed -= OnClipboardChanged;
             };
             RefreshClipboardCards();
-            SetClipboardStatus("拖到文件夹或网站，松开即可使用", false);
+            SetClipboardStatus("可把图片或文件拖到小球上锁定", false);
         }
 
         internal void OpenMode(string mode)
         {
             if (mode != "notes" && mode != "clipboard") throw new ArgumentException("Unknown utility mode.", "mode");
-            if (mode != Mode) EndClipboardGesture(false);
+            if (mode != Mode)
+            {
+                EndClipboardGesture(false);
+                ClearLockedReplacement();
+            }
             Flush();
             Mode = mode;
             bool showNotes = mode == "notes";
@@ -332,13 +415,13 @@ namespace Orbit
 
         private Border MakeClipboardCard(int index)
         {
-            var view = new ClipboardSlotView();
+            var view = new ClipboardSlotView { IsLockedSlot = index == HistorySlotCount };
             clipboardCards[index] = view;
             var card = new Border
             {
-                Height = 84, Background = ColorBrush("#22232D"), BorderBrush = ColorBrush("#383440"),
+                Background = ColorBrush("#22232D"), BorderBrush = ColorBrush("#383440"),
                 BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(9),
-                Padding = new Thickness(9), Margin = new Thickness(0, 0, 0, index < 2 ? 6 : 0),
+                Padding = new Thickness(8),
                 Focusable = true, Cursor = Cursors.Hand, UseLayoutRounding = true, SnapsToDevicePixels = true
             };
             view.Card = card;
@@ -347,15 +430,19 @@ namespace Orbit
             view.ThumbnailColumn = new ColumnDefinition { Width = new GridLength(0) };
             grid.ColumnDefinitions.Add(view.ThumbnailColumn);
             grid.ColumnDefinitions.Add(new ColumnDefinition());
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(28) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
             card.Child = grid;
 
             view.Image = new Image { Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
             AutomationProperties.SetAutomationId(view.Image, "ClipboardImage" + (index + 1));
+            view.FileIcon = new VectorIcon("document", 20, "#BBB0C8") { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+            var thumbnailContent = new Grid();
+            thumbnailContent.Children.Add(view.Image);
+            thumbnailContent.Children.Add(view.FileIcon);
             view.Thumbnail = new Border
             {
-                Width = 60, Height = 60, Padding = new Thickness(4), CornerRadius = new CornerRadius(6),
-                Background = ColorBrush("#16171D"), Child = view.Image, VerticalAlignment = VerticalAlignment.Center,
+                Width = 52, Height = 52, Padding = new Thickness(4), CornerRadius = new CornerRadius(6),
+                Background = ColorBrush("#16171D"), Child = thumbnailContent, VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 8, 0), Visibility = Visibility.Collapsed
             };
             grid.Children.Add(view.Thumbnail);
@@ -384,24 +471,48 @@ namespace Orbit
             Grid.SetColumn(labels, 1);
             grid.Children.Add(labels);
 
-            var actions = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            var actions = new Grid { VerticalAlignment = VerticalAlignment.Center };
+            actions.ColumnDefinitions.Add(new ColumnDefinition());
+            actions.ColumnDefinitions.Add(new ColumnDefinition());
+            if (!view.IsLockedSlot)
+            {
+                actions.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
+                actions.RowDefinitions.Add(new RowDefinition { Height = new GridLength(21) });
+            }
+            string lockLabel = view.IsLockedSlot ? "解除锁定" : "锁定此项";
+            view.LockToggle = SmallButton(String.Empty, lockLabel, delegate { ToggleClipboardLock(view); });
+            view.LockToggle.Content = new VectorIcon(view.IsLockedSlot ? "unlock" : "lock", 15, view.IsLockedSlot ? "#E8C574" : "#B7AAC5");
+            view.LockToggle.Width = 24;
+            view.LockToggle.Height = 24;
+            view.LockToggle.Padding = new Thickness(0);
+            view.LockToggle.Margin = new Thickness(0);
+            view.LockToggle.Background = Brushes.Transparent;
+            if (!view.IsLockedSlot) Grid.SetRowSpan(view.LockToggle, 2);
+            AutomationProperties.SetAutomationId(view.LockToggle, view.IsLockedSlot ? "UnlockSlot4" : "LockSlot" + (index + 1));
+            actions.Children.Add(view.LockToggle);
             view.Copy = SmallButton(String.Empty, "复制此项", delegate { CopyCard(view); });
             view.Copy.Content = new VectorIcon("clipboard", 16, "#CFC2DF");
-            view.Copy.Width = 26;
-            view.Copy.Height = 27;
+            view.Copy.Width = 24;
+            view.Copy.Height = 22;
             view.Copy.Padding = new Thickness(0);
-            view.Copy.Margin = new Thickness(0, 0, 0, 4);
+            view.Copy.Margin = new Thickness(0);
+            Grid.SetColumn(view.Copy, 1);
             AutomationProperties.SetAutomationId(view.Copy, "CopySlot" + (index + 1));
             actions.Children.Add(view.Copy);
-            view.Delete = SmallButton(String.Empty, "删除此项", delegate { DeleteCard(view); });
-            view.Delete.Content = new VectorIcon("close", 13, "#9D91AB");
-            view.Delete.Width = 26;
-            view.Delete.Height = 24;
-            view.Delete.Padding = new Thickness(0);
-            view.Delete.Margin = new Thickness(0);
-            view.Delete.Background = Brushes.Transparent;
-            AutomationProperties.SetAutomationId(view.Delete, "DeleteSlot" + (index + 1));
-            actions.Children.Add(view.Delete);
+            if (!view.IsLockedSlot)
+            {
+                view.Delete = SmallButton(String.Empty, "删除此项", delegate { DeleteCard(view); });
+                view.Delete.Content = new VectorIcon("close", 13, "#9D91AB");
+                view.Delete.Width = 24;
+                view.Delete.Height = 20;
+                view.Delete.Padding = new Thickness(0);
+                view.Delete.Margin = new Thickness(0);
+                view.Delete.Background = Brushes.Transparent;
+                Grid.SetColumn(view.Delete, 1);
+                Grid.SetRow(view.Delete, 1);
+                AutomationProperties.SetAutomationId(view.Delete, "DeleteSlot" + (index + 1));
+                actions.Children.Add(view.Delete);
+            }
             Grid.SetColumn(actions, 2);
             grid.Children.Add(actions);
 
@@ -556,10 +667,90 @@ namespace Orbit
             return new ClipboardEntry
             {
                 Id = entry.Id, Text = entry.Text, FileName = entry.FileName,
+                FilePath = entry.FilePath,
                 ImagePng = entry.ImagePng == null ? null : (byte[])entry.ImagePng.Clone(),
                 PixelWidth = entry.PixelWidth, PixelHeight = entry.PixelHeight,
                 CapturedAtUtc = entry.CapturedAtUtc
             };
+        }
+
+        private void ToggleClipboardLock(ClipboardSlotView view)
+        {
+            ClipboardEntry selected = view.Entry;
+            if (selected == null) return;
+            var history = app.ClipboardHistory;
+            if (view.IsLockedSlot)
+            {
+                bool unlocked = history.Unlock();
+                SetClipboardStatus(unlocked ? "已解除锁定" : history.LastError ?? "未能解除锁定。", !unlocked);
+                return;
+            }
+            RequestClipboardLock(delegate
+            {
+                foreach (var entry in history.Entries)
+                    if (entry.Id == selected.Id) return history.Lock(selected.Id);
+                // The three normal slots can still rotate while confirmation is open.
+                return history.LockDropped(selected);
+            });
+        }
+
+        internal bool TryLockDroppedFile(string path)
+        {
+            try
+            {
+                if (closed || app.IsExiting || clipboardDragging) return false;
+                ClipboardEntry dropped = ClipboardMonitor.ReadDroppedFile(path, app.Now());
+                return RequestClipboardLock(delegate { return app.ClipboardHistory.LockDropped(dropped); });
+            }
+            catch (Exception error)
+            {
+                RethrowFatal(error);
+                SetClipboardStatus("未能锁定：" + error.Message, true);
+                return false;
+            }
+        }
+
+        private bool RequestClipboardLock(Func<bool> save)
+        {
+            if (pendingLockedReplacement != null) return false;
+            var history = app.ClipboardHistory;
+            if (history.LockedEntry == null || !history.ConfirmLockedReplacement) return SaveClipboardLock(save);
+
+            if (!IsVisible || Mode != "clipboard") app.ShowTool("clipboard", false);
+            if (!IsVisible || Mode != "clipboard") return false;
+            pendingLockedReplacement = save;
+            clipboardView.IsEnabled = false;
+            lockedReplacementPrompt.Visibility = Visibility.Visible;
+            FocusManager.SetFocusedElement(this, cancelLockedReplacement);
+            Dispatcher.BeginInvoke(DispatcherPriority.Input, new Action(delegate
+            {
+                if (pendingLockedReplacement != null && IsVisible) cancelLockedReplacement.Focus();
+            }));
+            return true;
+        }
+
+        private bool SaveClipboardLock(Func<bool> save)
+        {
+            bool saved = save();
+            string warning = app.ClipboardHistory.LastError;
+            SetClipboardStatus(warning ?? (saved ? "已放入底部锁定槽" : "未能锁定。"), !saved || warning != null);
+            return saved;
+        }
+
+        private void CompleteLockedReplacement(bool confirmed)
+        {
+            var save = pendingLockedReplacement;
+            ClearLockedReplacement();
+            if (save == null) return;
+            if (confirmed) SaveClipboardLock(save);
+            else SetClipboardStatus("已保留原锁定内容", false);
+        }
+
+        private void ClearLockedReplacement()
+        {
+            pendingLockedReplacement = null;
+            lockedReplacementPrompt.Visibility = Visibility.Collapsed;
+            clipboardView.IsEnabled = true;
         }
 
         private void DeleteCard(ClipboardSlotView view)
@@ -581,23 +772,39 @@ namespace Orbit
                 return;
             }
             var entries = app.ClipboardHistory.Entries;
+            ClipboardEntry locked = app.ClipboardHistory.LockedEntry;
+            bool compact = locked != null;
+            int lockedRow = HistorySlotCount * 2;
+            clipboardSlots.RowDefinitions[lockedRow - 1].Height = new GridLength(compact ? 4 : 0);
+            clipboardSlots.RowDefinitions[lockedRow].Height = compact ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+            confirmLockedReplacement.IsChecked = app.ClipboardHistory.ConfirmLockedReplacement;
+            clipboardHint.Text = compact ? "最近 3 项 · 底部是独立锁定槽" : "最近 3 项 · 单击复制 · 拖出使用";
             for (int i = 0; i < clipboardCards.Length; i++)
             {
                 var view = clipboardCards[i];
-                ClipboardEntry entry = i < entries.Count ? entries[i] : null;
+                ClipboardEntry entry = view.IsLockedSlot ? locked : i < entries.Count ? entries[i] : null;
                 bool empty = entry == null;
                 bool image = !empty && entry.IsImage;
+                bool file = !empty && entry.IsFile;
                 string id = empty ? null : entry.Id;
                 bool changedImage = view.ImageId != id;
                 view.Entry = entry;
                 view.EntryId = id;
+                view.Card.Visibility = view.IsLockedSlot && !compact ? Visibility.Collapsed : Visibility.Visible;
+                view.Card.Padding = compact ? new Thickness(8, 5, 8, 5) : new Thickness(8);
+                view.Thumbnail.Width = view.Thumbnail.Height = compact ? 38 : 52;
+                view.Title.Height = compact ? 16 : 18;
+                view.Preview.Height = compact ? 17 : 34;
                 view.Copy.IsEnabled = !empty;
-                view.Delete.IsEnabled = !empty;
+                view.LockToggle.IsEnabled = !empty;
+                if (view.Delete != null) view.Delete.IsEnabled = !empty;
                 view.Card.Focusable = !empty;
                 view.Card.Cursor = empty ? Cursors.Arrow : Cursors.Hand;
                 view.Card.ToolTip = empty ? null : "单击复制 · 拖出使用";
-                view.ThumbnailColumn.Width = new GridLength(image ? 68 : 0);
-                view.Thumbnail.Visibility = image ? Visibility.Visible : Visibility.Collapsed;
+                view.ThumbnailColumn.Width = new GridLength(image || file ? view.Thumbnail.Width + 8 : 0);
+                view.Thumbnail.Visibility = image || file ? Visibility.Visible : Visibility.Collapsed;
+                view.Image.Visibility = image ? Visibility.Visible : Visibility.Collapsed;
+                view.FileIcon.Visibility = file ? Visibility.Visible : Visibility.Collapsed;
                 view.Title.ToolTip = null;
                 view.Preview.ToolTip = null;
                 view.Detail.ToolTip = null;
@@ -623,7 +830,8 @@ namespace Orbit
                     view.Title.ToolTip = name;
                     view.Title.FontSize = 12;
                     view.Title.Foreground = ColorBrush("#E0DAE8");
-                    view.Detail.Text = entry.PixelWidth + " × " + entry.PixelHeight + " · " + entry.CapturedAtUtc.ToLocalTime().ToString("HH:mm");
+                    view.Detail.Text = entry.PixelWidth + " × " + entry.PixelHeight + " · " +
+                        (view.IsLockedSlot ? "已锁定" : entry.CapturedAtUtc.ToLocalTime().ToString("HH:mm"));
                     view.Detail.Visibility = Visibility.Visible;
                     view.Preview.Visibility = Visibility.Collapsed;
                     if (changedImage || view.Image.Source == null)
@@ -634,11 +842,24 @@ namespace Orbit
                     if (view.Image.Source == null) view.Detail.Text = "预览暂不可用 · 可复制原图";
                     AutomationProperties.SetName(view.Card, "剪贴板图片 " + (i + 1) + "：" + name);
                 }
+                else if (file)
+                {
+                    view.Image.Source = null;
+                    view.ImageId = null;
+                    view.Title.Text = entry.FileName;
+                    view.Title.ToolTip = entry.FileName;
+                    view.Title.FontSize = 12;
+                    view.Title.Foreground = ColorBrush("#E0DAE8");
+                    view.Detail.Text = "文件 · 已锁定";
+                    view.Detail.Visibility = Visibility.Visible;
+                    view.Preview.Visibility = Visibility.Collapsed;
+                    AutomationProperties.SetName(view.Card, "锁定的文件：" + entry.FileName);
+                }
                 else
                 {
                     view.Image.Source = null;
                     view.ImageId = null;
-                    view.Title.Text = "文字 · " + entry.CapturedAtUtc.ToLocalTime().ToString("HH:mm");
+                    view.Title.Text = "文字 · " + (view.IsLockedSlot ? "已锁定" : entry.CapturedAtUtc.ToLocalTime().ToString("HH:mm"));
                     view.Title.FontSize = 11;
                     view.Title.Foreground = ColorBrush("#A89CB7");
                     view.Detail.Visibility = Visibility.Collapsed;
@@ -702,8 +923,8 @@ namespace Orbit
         {
             bool active = !String.IsNullOrEmpty(view.EntryId);
             bool hover = active && (view.Card.IsMouseOver || view.Card.IsKeyboardFocusWithin);
-            view.Card.Background = ColorBrush(hover ? "#2B2936" : "#22232D");
-            view.Card.BorderBrush = ColorBrush(hover ? "#716082" : "#383440");
+            view.Card.Background = ColorBrush(view.IsLockedSlot ? hover ? "#322C2A" : "#29252A" : hover ? "#2B2936" : "#22232D");
+            view.Card.BorderBrush = ColorBrush(view.IsLockedSlot ? hover ? "#F0CA75" : "#C49E52" : hover ? "#716082" : "#383440");
         }
 
         private static bool IsInteractiveChild(DependencyObject origin, DependencyObject card)
@@ -737,8 +958,10 @@ namespace Orbit
             internal Border Card, Thumbnail;
             internal ColumnDefinition ThumbnailColumn;
             internal Image Image;
+            internal VectorIcon FileIcon;
             internal TextBlock Title, Detail, Preview;
-            internal Button Copy, Delete;
+            internal Button Copy, Delete, LockToggle;
+            internal bool IsLockedSlot;
         }
 
         private sealed class ClipboardGesture

@@ -28,7 +28,12 @@ internal static class ClipboardHistoryTests
             Run("corrupt records are retained without crashing startup", CorruptState);
             Run("unsafe cache paths cannot escape the image directory", PathSafety);
             Run("invalid image captures fail without side effects", InvalidImages);
-            Console.WriteLine(failures == 0 ? "All 9 clipboard history test groups passed." : failures + " clipboard history test group(s) failed.");
+            Run("pinned item is separate from normal rotation and replacement", PinnedRotation);
+            Run("pinned state, preference and image ownership survive relaunch", PinnedPersistence);
+            Run("failed pin changes preserve the old pin and setting", PinnedAtomicFailure);
+            Run("ordinary files are independently snapshotted only in the pin", PinnedFileSnapshot);
+            Run("file snapshot bounds and metadata paths protect existing data", PinnedFileBoundaries);
+            Console.WriteLine(failures == 0 ? "All 14 clipboard history test groups passed." : failures + " clipboard history test group(s) failed.");
             return failures == 0 ? 0 : 1;
         }
         finally
@@ -243,6 +248,148 @@ internal static class ClipboardHistoryTests
         Assert(history.Entries.Count == 0 && !String.IsNullOrEmpty(history.LastError), "Invalid images must not create entries.");
         Assert(!history.Add(null) && !history.Add(new ClipboardEntry()), "Empty captures must fail safely.");
         Assert(history.Add(TextEntry("   ", 0)), "Whitespace-only clipboard text is still a real capture.");
+    }
+
+    private static void PinnedRotation()
+    {
+        var history = new ClipboardHistory(DirectoryFor("pin-rotation"));
+        foreach (string text in new[] { "one", "two", "three" }) Assert(history.Add(TextEntry(text, 0)), "Initial captures should save.");
+        ClipboardEntry pinned = history.Entries[1];
+        Assert(history.Lock(pinned.Id) && history.LockedEntry == pinned && history.Entries.Select(entry => entry.Text).SequenceEqual(new[] { "three", "one" }),
+            "Lock moves the selected object out of normal history without duplicating it.");
+        Assert(history.Add(TextEntry("four", 1)) && history.Add(TextEntry("five", 2)), "Normal capture should continue while pinned.");
+        Assert(history.Entries.Select(entry => entry.Text).SequenceEqual(new[] { "five", "four", "three" }) && history.LockedEntry == pinned,
+            "Three normal slots rotate without evicting the independent pin.");
+        int events = 0;
+        history.Changed += delegate { events++; };
+        Assert(history.Promote(pinned.Id) && history.Lock(pinned.Id) && events == 0, "Taking or relocking the pin is a successful no-op.");
+        Assert(!history.Remove(pinned.Id) && history.LockedEntry == pinned, "Normal deletion cannot remove a locked item.");
+        ClipboardEntry replacement = history.Entries[1];
+        Assert(history.Lock(replacement.Id) && history.LockedEntry == replacement && history.Entries.Count == 2 &&
+            history.Entries.All(entry => entry.Id != pinned.Id), "Replacing a pin discards the old pin without returning it to history.");
+        Assert(!history.Lock("missing") && history.LockedEntry == replacement, "Invalid replacement targets preserve the pin.");
+        Assert(history.Add(TextEntry("six", 3)), "Fill normal history before unlocking.");
+        Assert(history.Unlock() && history.LockedEntry == null && history.Entries[0] == replacement &&
+            history.Entries.Select(entry => entry.Text).SequenceEqual(new[] { "four", "six", "five" }),
+            "Unlock restores text at the front and evicts only the oldest normal slot.");
+        int previousEvents = events;
+        Assert(history.Unlock() && events == previousEvents, "Unlocking an empty pin is a no-op.");
+        Assert(history.Lock(history.Entries[0].Id), "Relock a normal entry.");
+        Assert(history.Add(new ClipboardEntry { Id = history.LockedEntry.Id, Text = "new external copy" }) && history.Entries[0].Id != history.LockedEntry.Id,
+            "A new capture cannot reuse the pinned entry's identity.");
+    }
+
+    private static void PinnedPersistence()
+    {
+        string directory = DirectoryFor("pin-persistence");
+        File.WriteAllText(Path.Combine(directory, "clipboard-history.json"), "{\"Version\":1,\"Entries\":[{\"Id\":\"legacy\",\"Text\":\"legacy text\"}]}");
+        var history = new ClipboardHistory(directory);
+        Assert(history.ConfirmLockedReplacement && history.LockedEntry == null && history.Entries.Count == 1, "Old history defaults to confirmation enabled and an empty pin.");
+        Assert(history.Lock("legacy") && history.SetConfirmLockedReplacement(false), "Pin and preference should save.");
+        history = new ClipboardHistory(directory);
+        Assert(!history.ConfirmLockedReplacement && history.LockedEntry.Id == "legacy" && history.Entries.Count == 0, "Both pin and disabled confirmation survive restart.");
+        byte[] png = MakePng(5, 4);
+        Assert(history.LockDropped(new ClipboardEntry { ImagePng = png, FileName = "固定图片.png", CapturedAtUtc = Epoch }), "Dropping an image should replace the pin.");
+        string cache = Path.Combine(directory, "clipboard-history-images");
+        string firstImage = Directory.GetFiles(cache, "*.png").Single();
+        Assert(history.Add(TextEntry("normal", 0)), "Normal text can coexist with an image pin.");
+        history = new ClipboardHistory(directory);
+        Assert(history.LockedEntry.IsImage && !history.LockedEntry.IsFile && history.LockedEntry.ImagePng.SequenceEqual(png) &&
+            history.LockedEntry.FileName == "固定图片.png" && !history.ConfirmLockedReplacement, "Image bytes, display name and preference survive relaunch.");
+        Assert(history.Unlock() && history.Entries[0].IsImage && File.Exists(firstImage), "Unlocking an image moves its owned cache to normal history without deleting it.");
+        Assert(history.Lock(history.Entries[0].Id) && history.LockDropped(TextEntry("replacement", 1)), "Replacing an image pin with text should save.");
+        Assert(!File.Exists(firstImage) && history.Entries.All(entry => entry.FileName != "固定图片.png"), "Replaced pinned image cache is cleaned only after commit, without restoring history.");
+        Assert(history.SetConfirmLockedReplacement(true) && new ClipboardHistory(directory).ConfirmLockedReplacement, "Re-enabling confirmation should persist.");
+    }
+
+    private static void PinnedAtomicFailure()
+    {
+        string directory = DirectoryFor("pin-atomic");
+        var history = new ClipboardHistory(directory);
+        Assert(history.LockDropped(new ClipboardEntry { ImagePng = MakePng(3, 3), FileName = "keep.png" }), "Initial pin saves.");
+        Assert(history.Add(TextEntry("normal", 0)), "Initial normal history saves.");
+        ClipboardEntry oldPin = history.LockedEntry, normal = history.Entries[0];
+        string source = Path.Combine(directory, "source.bin");
+        File.WriteAllBytes(source, new byte[] { 1, 2, 3, 4 });
+        string metadata = Path.Combine(directory, "clipboard-history.json");
+        byte[] before = File.ReadAllBytes(metadata);
+        int events = 0;
+        history.Changed += delegate { events++; };
+        using (var locked = new FileStream(metadata, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert(!history.Lock(normal.Id), "A failed move-to-pin must not remove normal history.");
+            Assert(!history.LockDropped(new ClipboardEntry { ImagePng = MakePng(4, 4) }), "A failed image replacement must preserve the old pin.");
+            Assert(!history.LockDropped(new ClipboardEntry { FilePath = source }), "A failed file snapshot commit must preserve the old pin.");
+            Assert(!history.Unlock() && !history.SetConfirmLockedReplacement(false), "Unlock and preference changes are transactional too.");
+        }
+        string cache = Path.Combine(directory, "clipboard-history-images");
+        Assert(history.LockedEntry == oldPin && history.Entries.Single() == normal && history.ConfirmLockedReplacement && events == 0,
+            "Every failed pin operation leaves the committed objects, setting and notifications unchanged.");
+        Assert(File.ReadAllBytes(metadata).SequenceEqual(before) && Directory.GetFiles(cache, "*.png").Length == 1 && Directory.GetDirectories(cache).Length == 0,
+            "Failed pin changes preserve exact metadata and old cache while cleaning only their newly created snapshots.");
+        Assert(File.ReadAllBytes(source).SequenceEqual(new byte[] { 1, 2, 3, 4 }), "Snapshot failure must never touch the source file.");
+        Assert(history.Unlock() && history.Entries[0] == oldPin && history.LastError == null, "A failed change can be retried after the lock is released.");
+    }
+
+    private static void PinnedFileSnapshot()
+    {
+        string directory = DirectoryFor("pin-file");
+        string source = Path.Combine(directory, "原始 报告.xlsx");
+        byte[] bytes = Enumerable.Range(0, 4097).Select(index => (byte)(index % 251)).ToArray();
+        File.WriteAllBytes(source, bytes);
+        var history = new ClipboardHistory(Path.Combine(directory, "data"));
+        foreach (string text in new[] { "one", "two", "three" }) Assert(history.Add(TextEntry(text, 0)), "Normal history fixture saves.");
+        var drop = new ClipboardEntry { Id = "file", FilePath = source, FileName = "../do-not-use.exe", CapturedAtUtc = Epoch };
+        Assert(!history.Add(drop) && history.LockDropped(drop), "Ordinary files are accepted only by the locked slot.");
+        ClipboardEntry pinned = history.LockedEntry;
+        string snapshot = pinned.FilePath;
+        Assert(pinned.IsFile && !pinned.IsImage && pinned.Text == null && pinned.FileName == "原始 报告.xlsx" &&
+            Path.GetFileName(snapshot) == pinned.FileName && snapshot != source && File.ReadAllBytes(snapshot).SequenceEqual(bytes),
+            "File pins expose an independent exact snapshot with the source basename and original extension.");
+        Assert(Path.GetDirectoryName(Path.GetDirectoryName(snapshot)) == Path.Combine(directory, "data", "clipboard-history-images"),
+            "Ordinary-file snapshots remain inside the existing private cache root.");
+        Assert(history.Entries.Count == 3 && history.Add(TextEntry("four", 4)) && history.LockedEntry == pinned && pinned.FilePath == snapshot,
+            "Normal rotation does not move or replace the pinned file's stable path.");
+        File.WriteAllText(source, "source changed");
+        Assert(File.ReadAllBytes(snapshot).SequenceEqual(bytes), "Editing the source after pinning cannot change the snapshot.");
+        File.Delete(source);
+        history = new ClipboardHistory(Path.Combine(directory, "data"));
+        Assert(history.LastError == null && history.LockedEntry.FilePath == snapshot && File.ReadAllBytes(snapshot).SequenceEqual(bytes),
+            "Pin persistence must not depend on the original file continuing to exist.");
+        string[] before = history.Entries.Select(entry => entry.Id).ToArray();
+        Assert(history.Unlock() && history.LockedEntry == null && history.Entries.Select(entry => entry.Id).SequenceEqual(before) && !File.Exists(snapshot),
+            "Unlocking an ordinary file clears the pin and its owned snapshot without adding it to normal history.");
+    }
+
+    private static void PinnedFileBoundaries()
+    {
+        string directory = DirectoryFor("pin-file-bounds");
+        var history = new ClipboardHistory(Path.Combine(directory, "data"));
+        Assert(history.LockDropped(TextEntry("keep", 0)), "Initial pin saves.");
+        ClipboardEntry old = history.LockedEntry;
+        string oversized = Path.Combine(directory, "oversized.bin");
+        using (var output = new FileStream(oversized, FileMode.CreateNew, FileAccess.Write)) output.SetLength(64L * 1024 * 1024 + 1);
+        Assert(!history.LockDropped(new ClipboardEntry { FilePath = oversized }) && history.LockedEntry == old, "Oversized files fail before snapshotting and preserve the pin.");
+        Assert(!history.LockDropped(new ClipboardEntry { FilePath = directory }) && !history.LockDropped(new ClipboardEntry { FilePath = "relative.bin" }) &&
+            !history.LockDropped(new ClipboardEntry { FilePath = "C:relative.bin" }), "Directories and relative paths are not ordinary-file drops.");
+        string empty = Path.Combine(directory, "empty.txt");
+        File.WriteAllBytes(empty, new byte[0]);
+        Assert(!history.LockDropped(new ClipboardEntry { FilePath = empty, Text = "ambiguous" }), "A file record cannot also contain text or PNG data.");
+        Assert(history.LockDropped(new ClipboardEntry { FilePath = empty }) && new FileInfo(history.LockedEntry.FilePath).Length == 0, "Empty ordinary files are valid snapshots.");
+        string own = history.LockedEntry.FilePath;
+        string unrelated = Path.Combine(Path.GetDirectoryName(own), "user-file.txt");
+        File.WriteAllText(unrelated, "leave alone");
+        Assert(history.LockDropped(TextEntry("replace file", 1)) && !File.Exists(own) && File.ReadAllText(unrelated) == "leave alone" && File.Exists(empty),
+            "Successful replacement cleans only the owned snapshot, leaving unrelated neighboring files and the original source untouched.");
+
+        string corruptDirectory = Path.Combine(directory, "corrupt-data");
+        Directory.CreateDirectory(corruptDirectory);
+        string metadata = Path.Combine(corruptDirectory, "clipboard-history.json");
+        string malicious = "{\"Version\":1,\"Entries\":[],\"LockedEntry\":{\"Id\":\"bad\",\"FileDirectory\":\"../..\",\"CachedFileName\":\"empty.txt\"}}";
+        File.WriteAllText(metadata, malicious);
+        var corrupt = new ClipboardHistory(corruptDirectory);
+        Assert(corrupt.LockedEntry == null && !String.IsNullOrEmpty(corrupt.LastError) && !corrupt.LockDropped(TextEntry("blocked", 0)) &&
+            File.ReadAllText(metadata) == malicious && File.Exists(empty), "A malicious pinned-file cache path is rejected without overwriting metadata or touching outside files.");
     }
 
     private static byte[] MakePng(int width, int height)

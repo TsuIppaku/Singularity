@@ -31,6 +31,7 @@ namespace Orbit
                 TestPngAndBitmap();
                 TestDib();
                 TestFiles(directory);
+                TestDroppedFiles(directory);
                 TestInvalidImages();
                 TestStartupBaseline();
                 TestTransport();
@@ -168,6 +169,61 @@ namespace Orbit
             gifFiles.SetFileDropList(new StringCollection { gifPath });
             ClipboardEntry gifEntry = ClipboardMonitor.ReadData(gifFiles, Now, out notice);
             Check(notice != null && notice.Contains("第一帧") && Pixels(gifEntry.ImagePng)[2] > 200, "animated image uses the first frame and explains it");
+        }
+
+        private static void TestDroppedFiles(string directory)
+        {
+            string documentPath = Path.Combine(directory, "手动锁定-说明.PDF");
+            byte[] document = { 37, 80, 68, 70, 45, 0, 255, 13, 10 };
+            File.WriteAllBytes(documentPath, document);
+            ClipboardEntry file = ClipboardMonitor.ReadDroppedFile(documentPath, Now);
+            Check(file.IsFile && !file.IsImage && file.Text == null && file.FilePath == documentPath &&
+                file.FileName == "手动锁定-说明.PDF" && file.CapturedAtUtc == Now, "explicit file drop retains original local path and filename without interpreting bytes as text");
+            Check(File.ReadAllBytes(documentPath).SequenceEqual(document), "explicit file inspection does not alter the original");
+            DataObject copiedFile = ClipboardMonitor.CreateDataObject(file, "ordinary-copy");
+            Check(copiedFile.GetFileDropList().Count == 1 && copiedFile.GetFileDropList()[0] == documentPath &&
+                copiedFile.GetDataPresent(ClipboardMonitor.OriginFormat, false), "ordinary file copy exposes FileDrop and the self-write marker");
+            Check(!copiedFile.GetDataPresent(DataFormats.UnicodeText, false) && !copiedFile.GetDataPresent(DataFormats.Bitmap, false),
+                "ordinary file copy does not fabricate text or an image");
+            var effect = copiedFile.GetData("Preferred DropEffect", false) as MemoryStream;
+            Check(effect != null && effect.ToArray().SequenceEqual(new byte[] { 1, 0, 0, 0 }), "ordinary file copy requests a native Copy effect");
+            Check(ClipboardMonitor.ReadData(copiedFile, Now) == null, "automatic capture still ignores ordinary file drops");
+
+            string svgPath = Path.Combine(directory, "矢量图.svg");
+            File.WriteAllText(svgPath, "<svg xmlns=\"http://www.w3.org/2000/svg\" />");
+            Check(ClipboardMonitor.ReadDroppedFile(svgPath, Now).IsFile, "unsupported image type is retained as an ordinary file");
+            string optionalPath = Path.Combine(directory, "optional-codec.webp");
+            File.WriteAllBytes(optionalPath, new byte[] { 82, 73, 70, 70, 0, 0, 0, 0, 87, 69, 66, 80 });
+            Check(ClipboardMonitor.ReadDroppedFile(optionalPath, Now).IsFile, "unavailable optional image codec falls back to file storage");
+
+            string pngPath = Path.Combine(directory, "拖入透明图.png");
+            byte[] pixels = { 0, 0, 200, 128, 0, 180, 0, 255, 160, 0, 0, 0, 30, 40, 50, 255 };
+            File.WriteAllBytes(pngPath, Encode(Bitmap(pixels), new PngBitmapEncoder()));
+            ClipboardEntry image = ClipboardMonitor.ReadDroppedFile(pngPath, Now);
+            Check(image.IsImage && !image.IsFile && image.FileName == "拖入透明图.png" && image.PixelWidth == 2 && image.PixelHeight == 2,
+                "supported dropped image becomes a named PNG preview instead of a generic file");
+            File.Delete(pngPath);
+            Check(Pixels(image.ImagePng)[3] == 128 && ClipboardMonitor.CreateDataObject(image, "dropped-image").ContainsImage(),
+                "explicit image drop retains alpha and stays usable after its original file is deleted");
+
+            string emptyPath = Path.Combine(directory, "empty.bin");
+            File.WriteAllBytes(emptyPath, new byte[0]);
+            Check(ClipboardMonitor.ReadDroppedFile(emptyPath, Now).IsFile, "empty ordinary files are valid");
+            string oversized = Path.Combine(directory, "too-large.bin");
+            using (var output = File.Create(oversized)) output.SetLength((long)ClipboardMonitor.MaximumFileBytes + 1);
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile(oversized, Now); }, "ordinary files over 64 MiB are rejected before reading bytes");
+            using (var held = new FileStream(documentPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile(documentPath, Now); }, "inaccessible file reports a friendly read error");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile(directory, Now); }, "folder drops are rejected");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile(Path.Combine(directory, "missing.pdf"), Now); }, "missing local file is rejected");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile("relative.pdf", Now); }, "relative paths are not accepted as dropped files");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile(@"\\server\share\document.pdf", Now); }, "network paths are rejected without opening the share");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile("https://example.invalid/document.pdf", Now); }, "URLs are never fetched as dropped files");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile(documentPath + ":stream", Now); }, "alternate data stream paths are rejected");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.CreateDataObject(new ClipboardEntry { FilePath = documentPath, Text = "mixed" }, "mixed"); }, "ambiguous file and text entries are rejected");
+            string damaged = Path.Combine(directory, "explicit-broken.png");
+            File.WriteAllText(damaged, "bad PNG");
+            Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadDroppedFile(damaged, Now); }, "corrupt supported image is reported rather than shown as a false preview");
         }
 
         private static void TestInvalidImages()

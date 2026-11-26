@@ -28,7 +28,9 @@ namespace Orbit
                 Run("history eviction and service lifetime do not invalidate exports", IndependentLifetime);
                 Run("cleanup only removes owned expired files", CleanupBoundaries);
                 Run("invalid input and occupied directories preserve existing files", InvalidAndOccupied);
-                Console.WriteLine(failures == 0 ? "All 7 clipboard drag export test groups passed." : failures + " clipboard drag export test group(s) failed.");
+                Run("ordinary files retain names, native formats and independent lifetimes", OrdinaryFiles);
+                Run("ordinary file failures preserve originals and export ownership", InvalidOrdinaryFiles);
+                Console.WriteLine(failures == 0 ? "All 9 clipboard drag export test groups passed." : failures + " clipboard drag export test group(s) failed.");
                 return failures == 0 ? 0 : 1;
             }
             finally
@@ -195,6 +197,62 @@ namespace Orbit
             var blocked = new ClipboardDragExport(occupied);
             AssertThrows(delegate { blocked.Prepare(TextEntry("blocked", "new")); }, "An occupied export root must fail instead of replacing existing data.");
             Assert(File.ReadAllText(occupiedRoot) == "existing user file", "An occupied path must retain its original bytes.");
+        }
+
+        private static void OrdinaryFiles()
+        {
+            string directory = DirectoryFor("ordinary-files");
+            string source = Path.Combine(directory, "用户资料 原名.PDF");
+            byte[] bytes = { 37, 80, 68, 70, 45, 0, 255, 13, 10 };
+            File.WriteAllBytes(source, bytes);
+            var history = new ClipboardHistory(directory);
+            Assert(history.LockDropped(new ClipboardEntry { Id = "locked-file", FilePath = source, FileName = Path.GetFileName(source), CapturedAtUtc = Epoch }), "Ordinary file locks into independent history storage.");
+            string pinPath = history.LockedEntry.FilePath;
+            Assert(pinPath != source, "Lock storage owns its independent copy.");
+            File.Delete(source);
+            var exporter = new ClipboardDragExport(directory, delegate { return Epoch; });
+            ClipboardDragPayload payload = exporter.Prepare(history.LockedEntry);
+            Assert(payload.FilePath != pinPath && Path.GetFileName(payload.FilePath) == "用户资料 原名.PDF", "File drag preserves the real filename and case-sensitive extension in an independent export.");
+            Assert(File.ReadAllBytes(payload.FilePath).SequenceEqual(bytes), "The exported binary file is byte-exact.");
+            AssertDropFormats(payload);
+            Assert(!payload.Data.GetDataPresent(DataFormats.UnicodeText, false) && !payload.Data.GetDataPresent(DataFormats.Bitmap, false), "Ordinary file export does not fabricate text or bitmap formats.");
+            Assert(history.Unlock() && !File.Exists(pinPath), "Unlock releases the locked cache file.");
+            Assert(File.ReadAllBytes(payload.FilePath).SequenceEqual(bytes), "Prepared file drop remains usable after source deletion and unlock.");
+            var copyData = ClipboardMonitor.CreateDataObject(new ClipboardEntry { FilePath = payload.FilePath, FileName = Path.GetFileName(payload.FilePath) }, "stable-export-copy");
+            Assert(copyData.GetFileDropList()[0] == payload.FilePath, "Copy can publish the independent export after its lock is gone.");
+            new ClipboardDragExport(directory, delegate { return Epoch.AddDays(8); });
+            Assert(!File.Exists(payload.FilePath), "Ordinary file exports obey the existing seven-day ownership cleanup.");
+
+            foreach (string name in new[] { "empty", "备份.tar.gz", ".orbit-drag-export.json" })
+            {
+                string path = Path.Combine(directory, name);
+                File.WriteAllBytes(path, new byte[0]);
+                ClipboardDragPayload named = exporter.Prepare(new ClipboardEntry { Id = name, FilePath = path, FileName = name });
+                Assert(Path.GetFileName(named.FilePath) == name && new FileInfo(named.FilePath).Length == 0, "Empty files and unusual valid extensions keep their names: " + name);
+                AssertDropFormats(named);
+                Assert(exporter.Prepare(new ClipboardEntry { Id = name, FilePath = path, FileName = name }).FilePath == named.FilePath, "Ordinary export is reusable, including a name matching the internal manifest.");
+            }
+            new ClipboardDragExport(directory, delegate { return Epoch.AddDays(8); });
+            Assert(Directory.GetDirectories(Path.Combine(directory, "clipboard-drag-exports")).Length == 0, "Nested reserved-name exports are safely removed by owned-file cleanup.");
+        }
+
+        private static void InvalidOrdinaryFiles()
+        {
+            string directory = DirectoryFor("invalid-files");
+            string source = Path.Combine(directory, "original.dat");
+            File.WriteAllBytes(source, new byte[] { 0, 255, 1 });
+            var exporter = new ClipboardDragExport(directory);
+            AssertThrows(delegate { exporter.Prepare(new ClipboardEntry { FilePath = source, Text = "ambiguous" }); }, "File and text cannot be mixed.");
+            AssertThrows(delegate { exporter.Prepare(new ClipboardEntry { FilePath = directory }); }, "Folders cannot be exported as files.");
+            AssertThrows(delegate { exporter.Prepare(new ClipboardEntry { FilePath = @"\\server\share\file.pdf" }); }, "UNC source paths are rejected before access.");
+            AssertThrows(delegate { exporter.Prepare(new ClipboardEntry { FilePath = "relative.pdf" }); }, "Relative source paths are rejected.");
+            AssertThrows(delegate { exporter.Prepare(new ClipboardEntry { FilePath = source, FileName = "../outside.pdf" }); }, "Unsafe display names cannot escape the export directory.");
+            using (var held = new FileStream(source, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                AssertThrows(delegate { exporter.Prepare(new ClipboardEntry { FilePath = source }); }, "An inaccessible source fails without a partial export.");
+            string large = Path.Combine(directory, "large.bin");
+            using (var output = File.Create(large)) output.SetLength(64L * 1024 * 1024 + 1);
+            AssertThrows(delegate { exporter.Prepare(new ClipboardEntry { FilePath = large }); }, "An oversized source is rejected before allocation.");
+            Assert(!Directory.Exists(Path.Combine(directory, "clipboard-drag-exports")) && File.ReadAllBytes(source).SequenceEqual(new byte[] { 0, 255, 1 }), "Rejected file input leaves no exports and never changes its original.");
         }
 
         private static void AssertDropFormats(ClipboardDragPayload payload)

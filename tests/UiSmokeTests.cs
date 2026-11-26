@@ -152,6 +152,7 @@ namespace Orbit
                 Placement.Move(app.Dot, -20000, -20000); Placement.Clamp(app.Dot); app.RepositionTools(); Pump();
                 Check(Inside(Placement.Bounds(app.Dot), Placement.WorkArea(app.Dot)), "Off-screen dot is recovered safely");
                 CheckTaskCompletionActions(app, now, output);
+                CheckOrbFileDropPreview(app, output);
                 report.AppendLine("PASS: " + checks + " desktop integration checks. System clipboard untouched; audio suppressed.");
                 Environment.ExitCode = 0;
             }
@@ -299,6 +300,7 @@ namespace Orbit
             Check(app.ClipboardHistory.Entries.Count == 3 && app.ClipboardHistory.Entries[0].Text == "新的复制自动排在最前面", "The next automatic copy refills the three-slot history");
             app.ClipboardWriterForTest = null;
             CheckClipboardDrag(app, now, output);
+            CheckLockedClipboard(app, now, output, png);
         }
 
         private static void CheckClipboardDrag(AppController app, DateTimeOffset now, string output)
@@ -374,6 +376,182 @@ namespace Orbit
             CaptureGroup(app, Path.Combine(output, "10-clipboard-drag.png"));
             app.ClipboardDragRunnerForTest = null;
             app.ClipboardWriterForTest = null;
+        }
+
+        private static void CheckLockedClipboard(AppController app, DateTimeOffset now, string output, byte[] imagePng)
+        {
+            var panel = Placement.Rectangle(app.Utilities);
+            var bar = Placement.Rectangle(app.Launcher);
+            var fourth = ById<Border>(app.Utilities, "ClipboardCard4");
+            var confirm = ById<CheckBox>(app.Utilities, "ConfirmLockedReplacement");
+            Check(app.ClipboardHistory.LockedEntry == null && (fourth == null || fourth.Visibility != Visibility.Visible), "The extra locked card stays hidden until an item is pinned");
+            Check(confirm != null && confirm.IsChecked == true && app.ClipboardHistory.ConfirmLockedReplacement, "Replacing a locked item asks for confirmation by default");
+            Check(Enumerable.Range(1, 3).All(slot => ById<Button>(app.Utilities, "LockSlot" + slot) != null), "Each occupied recent slot exposes a lock action");
+
+            int copies = 0, drags = 0;
+            ClipboardEntry copied = null;
+            IDataObject payload = null;
+            app.ClipboardWriterForTest = delegate(ClipboardEntry entry) { copies++; copied = entry; return true; };
+            app.ClipboardDragRunnerForTest = delegate(DependencyObject source, IDataObject data, DragDropEffects effects)
+            {
+                drags++; payload = data;
+                return DragDropEffects.Copy;
+            };
+            try
+            {
+                var initial = app.ClipboardHistory.Entries[0];
+                var lockButton = ById<Button>(app.Utilities, "LockSlot1");
+                var start = new Point(30, 35);
+                var dragMove = new Point(start.X + SystemParameters.MinimumHorizontalDragDistance + 20, start.Y + 20);
+                lockButton.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left) { RoutedEvent = UIElement.PreviewMouseLeftButtonDownEvent });
+                app.Utilities.MoveClipboardGesture(dragMove, true); app.Utilities.EndClipboardGesture(false);
+                Check(copies == 0 && drags == 0 && !app.Utilities.ClipboardGesturePending, "Pressing a lock button does not start a card drag or copy its content");
+                Click(lockButton); Pump();
+                fourth = ById<Border>(app.Utilities, "ClipboardCard4");
+                var third = ById<Border>(app.Utilities, "ClipboardCard3");
+                Check(app.ClipboardHistory.LockedEntry != null && app.ClipboardHistory.LockedEntry.Id == initial.Id && fourth != null && fourth.Visibility == Visibility.Visible && !LockedPromptVisible(app), "Locking the first item immediately reveals its separate fourth card");
+                var lockedBorder = fourth.BorderBrush as SolidColorBrush;
+                Check(lockedBorder != null && lockedBorder.Color.R > lockedBorder.Color.B && lockedBorder.Color.G > lockedBorder.Color.B && ById<Button>(app.Utilities, "UnlockSlot4") != null && ById<Button>(app.Utilities, "DeleteSlot4") == null, "Locked card uses a yellow border and unlock action without a delete button");
+                Check(third != null && fourth.TranslatePoint(new Point(), app.Utilities).Y >= third.TranslatePoint(new Point(0, third.ActualHeight), app.Utilities).Y && Placement.Rectangle(app.Utilities) == panel && Placement.Rectangle(app.Launcher) == bar, "The fourth card follows recent slots without growing the panel or moving the launcher");
+
+                for (int i = 0; i < 4; i++) app.CaptureClipboardEntry(new ClipboardEntry { Text = "锁定后的新复制 " + i, CapturedAtUtc = now.AddSeconds(30 + i) });
+                Pump();
+                Check(app.ClipboardHistory.Entries.Count == 3 && app.ClipboardHistory.Entries[0].Text == "锁定后的新复制 3" && app.ClipboardHistory.LockedEntry.Id == initial.Id && app.ClipboardHistory.LockedEntry.Text == initial.Text, "Recent copies rotate through three slots while the locked content remains unchanged");
+                var recentOrder = app.ClipboardHistory.Entries.Select(entry => entry.Id).ToArray();
+                Click(ById<Button>(app.Utilities, "CopySlot4")); Pump();
+                Check(copies == 1 && copied != null && copied.Id == initial.Id && copied.Text == initial.Text && app.ClipboardHistory.LockedEntry.Id == initial.Id && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentOrder), "Copying the locked text preserves the pin and recent-slot order");
+                var scroll = FindFirst<ScrollViewer>(app.Utilities);
+                if (scroll != null) scroll.ScrollToBottom();
+                CaptureGroup(app, Path.Combine(output, "13-locked-clipboard.png"));
+
+                var replacement = app.ClipboardHistory.Entries[1];
+                Click(ById<Button>(app.Utilities, "LockSlot2")); Pump();
+                Check(LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == initial.Id && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentOrder), "A replacement lock stages confirmation without changing either clipboard collection");
+                CaptureGroup(app, Path.Combine(output, "14-locked-replacement.png"));
+                Click(ById<Button>(app.Utilities, "ConfirmLockedReplaceNo")); Pump();
+                Check(!LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == initial.Id && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentOrder), "Cancelling locked replacement keeps both the old pin and incoming recent entry");
+                Click(ById<Button>(app.Utilities, "LockSlot2"));
+                Click(ById<Button>(app.Utilities, "ConfirmLockedReplaceYes")); Pump();
+                Check(!LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == replacement.Id && !app.ClipboardHistory.Entries.Any(entry => entry.Id == initial.Id) && app.ClipboardHistory.Entries.Count <= 3, "Confirming replacement installs the selected entry and discards the former pin");
+
+                SetLockedConfirmation(app, false);
+                var reopened = new ClipboardHistory(Path.Combine(output, "state"));
+                Check(!app.ClipboardHistory.ConfirmLockedReplacement && !reopened.ConfirmLockedReplacement && reopened.LockedEntry != null && reopened.LockedEntry.Id == replacement.Id, "The replacement-confirmation preference and locked entry persist together");
+                var immediate = app.ClipboardHistory.Entries[0];
+                Click(ById<Button>(app.Utilities, "LockSlot1")); Pump();
+                Check(!LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == immediate.Id && !app.ClipboardHistory.Entries.Any(entry => entry.Id == replacement.Id), "Disabling confirmation makes subsequent lock replacement immediate");
+                Click(ById<Button>(app.Utilities, "UnlockSlot4")); Pump();
+                Check(app.ClipboardHistory.LockedEntry == null && ById<Border>(app.Utilities, "ClipboardCard4").Visibility != Visibility.Visible && app.ClipboardHistory.Entries.Count <= 3 && app.ClipboardHistory.Entries.Any(entry => entry.Text == immediate.Text), "Unlocking text hides the extra card and returns its content to recent history");
+
+                string fixtures = Path.Combine(output, "locked-clipboard-fixtures");
+                Directory.CreateDirectory(fixtures);
+                string filePath = Path.Combine(fixtures, "归档资料.bin");
+                byte[] fileBytes = { 0, 1, 2, 3, 5, 8, 13, 21, 34, 55 };
+                File.WriteAllBytes(filePath, fileBytes);
+                string imagePath = Path.Combine(fixtures, "锁定图像.png");
+                File.WriteAllBytes(imagePath, imagePng);
+                Check(app.Utilities.TryLockDroppedFile(filePath), "A single ordinary file is accepted by the clipboard drop command");
+                Pump();
+                var lockedFile = app.ClipboardHistory.LockedEntry;
+                Check(lockedFile != null && !lockedFile.IsImage && lockedFile.FileName == Path.GetFileName(filePath) && FindText(ById<Border>(app.Utilities, "ClipboardCard4"), Path.GetFileName(filePath)), "Dropped ordinary files display their original filename in the locked card");
+                int copiesBeforeDrag = copies;
+                Click(ById<Button>(app.Utilities, "CopySlot4")); Pump();
+                Check(copies == copiesBeforeDrag + 1 && copied.Id == lockedFile.Id && app.ClipboardHistory.LockedEntry.Id == lockedFile.Id, "The locked file copy button uses the clipboard writer without unlocking it");
+                string copiedFilePath = copied.FilePath;
+                Check(copiedFilePath != lockedFile.FilePath && File.ReadAllBytes(copiedFilePath).SequenceEqual(fileBytes), "Copying a locked file prepares an independent file for a later paste");
+                recentOrder = app.ClipboardHistory.Entries.Select(entry => entry.Id).ToArray();
+                Check(app.Utilities.BeginClipboardGesture(3, start, false), "The locked fourth card accepts the shared external-drag gesture");
+                app.Utilities.MoveClipboardGesture(dragMove, true); app.Utilities.EndClipboardGesture(true); Pump();
+                var filePaths = payload == null ? null : payload.GetData(DataFormats.FileDrop) as string[];
+                Check(drags == 1 && copies == copiesBeforeDrag + 1 && filePaths != null && filePaths.Length == 1 && Path.GetFileName(filePaths[0]) == Path.GetFileName(filePath) && File.ReadAllBytes(filePaths[0]).SequenceEqual(fileBytes), "Dragging a locked file offers its exact bytes and filename without an extra clipboard copy");
+                Check(app.ClipboardHistory.LockedEntry.Id == lockedFile.Id && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentOrder), "Dragging a locked file preserves both the pin and recent-history order");
+                Check(!app.Utilities.TryLockDroppedFile(Path.Combine(fixtures, "missing.bin")) && !app.Utilities.TryLockDroppedFile(fixtures) && app.ClipboardHistory.LockedEntry.Id == lockedFile.Id, "Invalid file paths and directory drops leave the existing pin intact");
+
+                SetLockedConfirmation(app, true);
+                Check(app.Utilities.TryLockDroppedFile(imagePath), "An image drop is accepted while replacement confirmation is enabled");
+                Pump();
+                Check(LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == lockedFile.Id, "Dropping an image over an occupied pin waits for confirmation");
+                Click(ById<Button>(app.Utilities, "ConfirmLockedReplaceNo")); Pump();
+                Check(app.ClipboardHistory.LockedEntry.Id == lockedFile.Id && !LockedPromptVisible(app), "Cancelling a dropped replacement preserves the previously locked file");
+                Check(app.Utilities.TryLockDroppedFile(imagePath), "The same image can be staged again after cancellation");
+                Click(ById<Button>(app.Utilities, "ConfirmLockedReplaceYes")); Pump();
+                var lockedImage = app.ClipboardHistory.LockedEntry;
+                var imageView = FindFirst<Image>(ById<Border>(app.Utilities, "ClipboardCard4"));
+                Check(lockedImage != null && lockedImage.IsImage && lockedImage.FileName == Path.GetFileName(imagePath) && lockedImage.PixelWidth == 240 && lockedImage.PixelHeight == 140 && imageView != null && imageView.Source is BitmapSource && imageView.Stretch == Stretch.Uniform, "Confirmed image drops replace the pin and render a proportionate thumbnail with original dimensions");
+                Check(!app.ClipboardHistory.Entries.Any(entry => entry.Id == lockedFile.Id) && app.ClipboardHistory.Entries.Count <= 3, "Replacing a pinned file discards it without adding it to the three recent slots");
+                Check(!File.Exists(lockedFile.FilePath) && File.ReadAllBytes(copiedFilePath).SequenceEqual(fileBytes), "Replacing the pin leaves the previously copied file available to paste");
+                app.Utilities.BeginClipboardGesture(3, start, false);
+                app.Utilities.MoveClipboardGesture(dragMove, true); app.Utilities.EndClipboardGesture(true); Pump();
+                var imagePaths = payload.GetData(DataFormats.FileDrop) as string[];
+                Check(drags == 2 && imagePaths != null && imagePaths.Length == 1 && File.ReadAllBytes(imagePaths[0]).SequenceEqual(lockedImage.ImagePng) && app.ClipboardHistory.LockedEntry.Id == lockedImage.Id, "Locked image dragging exports its stored PNG while keeping the image pinned");
+                Click(ById<Button>(app.Utilities, "UnlockSlot4")); Pump();
+                Check(app.ClipboardHistory.LockedEntry == null && app.ClipboardHistory.Entries.Count <= 3 && app.ClipboardHistory.Entries.Any(entry => entry.IsImage && entry.FileName == lockedImage.FileName && entry.ImagePng.SequenceEqual(lockedImage.ImagePng)), "Unlocking an image returns its original content to normal recent history");
+
+                recentOrder = app.ClipboardHistory.Entries.Select(entry => entry.Id).ToArray();
+                Check(app.Utilities.TryLockDroppedFile(filePath), "A file can be pinned again after image unlock");
+                Click(ById<Button>(app.Utilities, "UnlockSlot4")); Pump();
+                Check(app.ClipboardHistory.LockedEntry == null && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentOrder), "Unlocking an ordinary file simply clears the pin and leaves recent text and images untouched");
+                Check(Placement.Rectangle(app.Utilities) == panel && Placement.Rectangle(app.Launcher) == bar && !LockedPromptVisible(app), "Pinning, replacement, dragging and unlocking preserve the fixed clipboard panel and toolbar geometry");
+                reopened = new ClipboardHistory(Path.Combine(output, "state"));
+                Check(reopened.LockedEntry == null && reopened.ConfirmLockedReplacement && reopened.Entries.Select(entry => entry.Id).SequenceEqual(recentOrder), "Unlocking and the restored confirmation preference persist without changing recent order");
+            }
+            finally
+            {
+                app.ClipboardWriterForTest = null;
+                app.ClipboardDragRunnerForTest = null;
+            }
+        }
+
+        private static void CheckOrbFileDropPreview(AppController app, string output)
+        {
+            app.HideTools(); Pump();
+            var bounds = Placement.Rectangle(app.Dot);
+            var active = app.Engine.ActiveTask;
+            DateTimeOffset? deadline = active == null ? null : active.DueAtUtc;
+            var networkData = new DataObject();
+            networkData.SetData(DataFormats.FileDrop, new[] { "\\\\orbit-smoke.invalid\\share\\missing.bin" });
+            Check(!app.Dot.PreviewFileDrop(networkData, DragDropEffects.Copy), "Orb hover rejects UNC file paths before probing external storage");
+            app.Dot.CancelFileDropPreview();
+            var data = new DataObject();
+            data.SetData(DataFormats.FileDrop, new[] { Path.Combine(output, "locked-clipboard-fixtures", "归档资料.bin") });
+            bool accepted = app.Dot.PreviewFileDrop(data, DragDropEffects.Copy);
+            app.PreviewLauncher();
+            // Let the native target's small morph finish before capturing it.
+            var frame = new DispatcherFrame();
+            var settle = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(180) };
+            settle.Tick += delegate { settle.Stop(); frame.Continue = false; };
+            settle.Start(); Dispatcher.PushFrame(frame);
+            Check(accepted && app.Dot.IsReceivingFileDrop && !app.Launcher.IsVisible && !app.Utilities.IsVisible && Placement.Rectangle(app.Dot) == bounds && FindText(app.Dot, "松开放入"), "File drag previews on the closed orb without opening tools or changing its native bounds");
+            Capture(app.Dot, Path.Combine(output, "15-orb-file-drop.png"));
+            app.Dot.CancelFileDropPreview(); Pump();
+            Check(!app.Dot.IsReceivingFileDrop && active != null && app.Engine.ActiveTask == active && active.Status == OrbitTaskStatus.Running && active.DueAtUtc == deadline && FindFirst<TextBlock>(app.Dot).Visibility == Visibility.Visible && Placement.Rectangle(app.Dot) == bounds, "Cancelling the orb drop preview restores the countdown without changing its active timer or deadline");
+            Check(app.Dot.ReceiveFileDrop(data, DragDropEffects.Copy) && app.ClipboardHistory.LockedEntry.IsFile && !app.Utilities.IsVisible,
+                "Dropping into an empty pin locks the file directly from the closed orb");
+            string firstPinId = app.ClipboardHistory.LockedEntry.Id;
+            var imageDrop = new DataObject();
+            imageDrop.SetData(DataFormats.FileDrop, new[] { Path.Combine(output, "locked-clipboard-fixtures", "锁定图像.png") });
+            Check(app.Dot.ReceiveFileDrop(imageDrop, DragDropEffects.Copy), "The closed orb accepts a replacement candidate");
+            Pump();
+            Check(app.Utilities.IsVisible && LockedPromptVisible(app) && app.ClipboardHistory.LockedEntry.Id == firstPinId,
+                "An occupied pin opens confirmation from the orb before changing the locked entry");
+            Click(ById<Button>(app.Utilities, "ConfirmLockedReplaceYes")); Pump();
+            Check(app.ClipboardHistory.LockedEntry.IsImage && !LockedPromptVisible(app),
+                "Confirming the orb drop replaces the locked file with the dropped image");
+        }
+
+        private static bool LockedPromptVisible(AppController app)
+        {
+            var prompt = ById<FrameworkElement>(app.Utilities, "LockedReplacementPrompt");
+            return prompt != null && prompt.Visibility == Visibility.Visible;
+        }
+
+        private static void SetLockedConfirmation(AppController app, bool enabled)
+        {
+            var box = ById<CheckBox>(app.Utilities, "ConfirmLockedReplacement");
+            if (box == null) throw new InvalidOperationException("Expected locked-replacement preference was not rendered.");
+            box.IsChecked = enabled;
+            box.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            Pump();
         }
 
         private static bool FindText(DependencyObject node, string value)

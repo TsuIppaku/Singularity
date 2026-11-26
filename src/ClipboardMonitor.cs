@@ -23,6 +23,7 @@ namespace Orbit
     {
         internal const string OriginFormat = "Orbit.Clipboard.Origin.v1";
         internal const int MaximumImageBytes = 32 * 1024 * 1024;
+        internal const int MaximumFileBytes = 64 * 1024 * 1024;
         internal const long MaximumImagePixels = 24L * 1024 * 1024;
         internal const int MaximumTextCharacters = 1000000;
         private const int WmClipboardUpdate = 0x031D;
@@ -260,7 +261,17 @@ namespace Orbit
         {
             if (entry == null) throw new ArgumentNullException("entry");
             var data = new DataObject();
-            if (entry.ImagePng != null && entry.ImagePng.Length > 0)
+            if (entry.IsFile)
+            {
+                if (entry.IsImage || !String.IsNullOrEmpty(entry.Text)) throw new InvalidDataException("文件记录不能同时包含图片或文字。");
+                string path = ValidateLocalFilePath(entry.FilePath);
+                CheckReadableFile(path);
+                var files = new StringCollection();
+                files.Add(path);
+                data.SetFileDropList(files);
+                data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes((int)DragDropEffects.Copy), false), false);
+            }
+            else if (entry.ImagePng != null && entry.ImagePng.Length > 0)
             {
                 bool animated;
                 BitmapSource image = DecodeEncodedImage(entry.ImagePng, out animated);
@@ -279,6 +290,100 @@ namespace Orbit
             if (!String.IsNullOrEmpty(originToken))
                 data.SetData(OriginFormat, new MemoryStream(Encoding.ASCII.GetBytes(originToken), false), false);
             return data;
+        }
+
+        // Explicit drop/pin input only. Automatic clipboard capture deliberately
+        // continues to accept just text and readable images in ReadData below.
+        internal static ClipboardEntry ReadDroppedFile(string path, DateTimeOffset now)
+        {
+            string localPath = ValidateLocalFilePath(path);
+            long length = CheckReadableFile(localPath);
+            if (IsImageFileName(localPath))
+            {
+                string extension = Path.GetExtension(localPath).ToLowerInvariant();
+                bool optionalCodec = extension == ".webp" || extension == ".heic" || extension == ".heif";
+                if (length > MaximumImageBytes)
+                {
+                    if (!optionalCodec) throw new InvalidDataException("图片超过 32 MB，暂不能显示预览。");
+                }
+                else
+                {
+                    byte[] bytes;
+                    try
+                    {
+                        using (var input = new FileStream(localPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                            bytes = ReadBytes(input, MaximumImageBytes);
+                    }
+                    catch (Exception error)
+                    {
+                        if (!IsExpectedFailure(error)) throw;
+                        throw new InvalidDataException("图片文件正被占用或无法读取，请稍后重试。", error);
+                    }
+                    try
+                    {
+                        bool animated;
+                        BitmapSource bitmap = DecodeEncodedImage(bytes, out animated);
+                        return ImageEntry(bitmap, Path.GetFileName(localPath), now);
+                    }
+                    catch (Exception error)
+                    {
+                        if (!IsExpectedImageFailure(error)) throw;
+                        // Optional WIC codecs depend on the computer. Preserve
+                        // unsupported formats as ordinary files, without a preview.
+                        if (!optionalCodec) throw new InvalidDataException(FriendlyMessage(error), error);
+                    }
+                }
+            }
+            return new ClipboardEntry
+            {
+                Id = Guid.NewGuid().ToString("N"), FilePath = localPath, FileName = Path.GetFileName(localPath),
+                CapturedAtUtc = now.ToUniversalTime()
+            };
+        }
+
+        private static string ValidateLocalFilePath(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path) || path.Length < 3 || !Char.IsLetter(path[0]) || path[1] != ':' ||
+                (path[2] != '\\' && path[2] != '/') || path.IndexOf(':', 2) >= 0)
+                throw new InvalidDataException("请拖入一个本地文件；暂不支持文件夹、网络路径或链接。");
+            try
+            {
+                string fullPath = Path.GetFullPath(path);
+                if (new DriveInfo(Path.GetPathRoot(fullPath)).DriveType == DriveType.Network)
+                    throw new InvalidDataException("暂不支持网络位置的文件，请先保存到本机。");
+                FileAttributes attributes = File.GetAttributes(fullPath);
+                if ((attributes & FileAttributes.Directory) != 0) throw new InvalidDataException("暂不支持文件夹，请拖入单个文件。");
+                for (string current = fullPath; !String.IsNullOrEmpty(current); current = Path.GetDirectoryName(current))
+                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                        throw new InvalidDataException("暂不支持链接或重定向路径，请拖入原始本地文件。");
+                return fullPath;
+            }
+            catch (InvalidDataException) { throw; }
+            catch (Exception error)
+            {
+                if (!IsExpectedFailure(error)) throw;
+                throw new InvalidDataException("文件不存在、没有读取权限或路径无法使用。", error);
+            }
+        }
+
+        private static long CheckReadableFile(string path)
+        {
+            try
+            {
+                // Inspect access and length only; ordinary file bytes are copied
+                // by the history store after the user locks the item.
+                using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    if (input.Length > MaximumFileBytes) throw new InvalidDataException("文件超过 64 MB，暂不能收存。");
+                    return input.Length;
+                }
+            }
+            catch (InvalidDataException) { throw; }
+            catch (Exception error)
+            {
+                if (!IsExpectedFailure(error)) throw;
+                throw new InvalidDataException("文件正被占用或无法读取，请稍后重试。", error);
+            }
         }
 
         internal static ClipboardEntry ReadData(IDataObject data, DateTimeOffset now)
@@ -663,7 +768,7 @@ namespace Orbit
 
         private static bool IsExpectedFailure(Exception error)
         {
-            return error is IOException || error is UnauthorizedAccessException || error is SecurityException ||
+            return error is InvalidDataException || error is IOException || error is UnauthorizedAccessException || error is SecurityException ||
                 error is ArgumentException || error is FormatException || error is NotSupportedException ||
                 error is InvalidOperationException || error is ExternalException || error is OverflowException;
         }

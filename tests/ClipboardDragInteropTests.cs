@@ -68,6 +68,23 @@ namespace Orbit
                 finally { ReleaseStgMedium(ref bitmapMedium); }
                 Assert(ReadGlobalBytes(imageNative, RegisteredFormat("PNG")).Take(png.Length).SequenceEqual(png), "Repeated native retrieval keeps PNG available");
 
+                string ordinarySource = Path.Combine(fixtureRoot, "原始文件.PDF");
+                byte[] ordinaryBytes = { 37, 80, 68, 70, 45, 0, 255, 13, 10 };
+                File.WriteAllBytes(ordinarySource, ordinaryBytes);
+                var ordinaryPayload = exporter.Prepare(new ClipboardEntry
+                {
+                    Id = "interop-ordinary", FilePath = ordinarySource, FileName = Path.GetFileName(ordinarySource),
+                    CapturedAtUtc = DateTimeOffset.UtcNow
+                });
+                File.Delete(ordinarySource);
+                var ordinaryNative = (ComDataObject)ordinaryPayload.Data;
+                VerifyFileDrop(ordinaryNative, ordinaryPayload.FilePath, "ordinary file");
+                VerifyCopyEffect(ordinaryNative);
+                Assert(Path.GetFileName(ordinaryPayload.FilePath) == "原始文件.PDF" && File.ReadAllBytes(ordinaryPayload.FilePath).SequenceEqual(ordinaryBytes),
+                    "Native ordinary FileDrop keeps the real filename and bytes after source deletion");
+                FORMATETC textFormat = Format(13, TYMED.TYMED_HGLOBAL);
+                Assert(ordinaryNative.QueryGetData(ref textFormat) != 0, "Ordinary file payload does not advertise fabricated UnicodeText");
+
                 // A target resolves CF_HDROP paths and reads/copies bytes itself.
                 // This receiver is isolated in our own temporary directory.
                 string receiverDirectory = Path.Combine(fixtureRoot, "receiver");
