@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -849,6 +850,8 @@ namespace Orbit
 
         internal bool IsReceivingFileDrop { get; private set; }
 
+        internal void SetGazeForTest(Point offset) { if (app.IsTest) visual.SetGazeForTest(offset); }
+
         internal DotWindow(AppController app)
         {
             this.app = app;
@@ -974,22 +977,33 @@ namespace Orbit
 
     internal sealed class DotVisual : FrameworkElement
     {
+        private const double TimerMorphSeconds = .64;
+        private const double OrbitSeconds = 17;
+        private const double BlinkSeconds = .235;
         private static readonly DependencyProperty FileDropMorphProperty = DependencyProperty.Register(
             "FileDropMorph", typeof(double), typeof(DotVisual), new FrameworkPropertyMetadata(0.0, FrameworkPropertyMetadataOptions.AffectsRender));
         private readonly AppController app;
         private readonly VisualCollection children;
-        private readonly TextBlock countdown;
         private readonly TextBlock fileDropLabel;
+        private readonly LedFaceRenderer face = new LedFaceRenderer();
+        private readonly Stopwatch clock = Stopwatch.StartNew();
+        private readonly DispatcherTimer ticker;
+        private readonly Random blinkInterval = new Random();
+        private Vector gaze, testGaze;
+        private double orbitAngle = -.85;
+        private double openness = 1;
+        private double nextBlink = 5;
+        private double blinkStarted = -1;
+        private double lastFrame;
+        private double timerMix;
+        private double morphFrom, morphStarted;
+        private bool wantsTimer;
         private bool fileDropReady;
         private string fileDropFeedback;
         private bool fileDropError;
         internal DotVisual(AppController app)
         {
             this.app = app; Width = 88; Height = 88; UseLayoutRounding = true; SnapsToDevicePixels = true;
-            countdown = new TextBlock { FontFamily = new FontFamily("Consolas"), FontWeight = FontWeights.Medium, FontSize = 14, Foreground = Display.Brush("#DFF8F4"), TextAlignment = TextAlignment.Center, VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false, SnapsToDevicePixels = true, UseLayoutRounding = true };
-            TextOptions.SetTextFormattingMode(countdown, TextFormattingMode.Display);
-            TextOptions.SetTextRenderingMode(countdown, TextRenderingMode.Grayscale);
-            System.Windows.Documents.Typography.SetNumeralAlignment(countdown, FontNumeralAlignment.Tabular);
             fileDropLabel = new TextBlock
             {
                 FontFamily = new FontFamily("Segoe UI, Microsoft YaHei UI"), FontWeight = FontWeights.Medium, FontSize = 11,
@@ -999,12 +1013,17 @@ namespace Orbit
             };
             TextOptions.SetTextFormattingMode(fileDropLabel, TextFormattingMode.Display);
             TextOptions.SetTextRenderingMode(fileDropLabel, TextRenderingMode.Grayscale);
-            children = new VisualCollection(this); children.Add(countdown); children.Add(fileDropLabel);
+            children = new VisualCollection(this); children.Add(fileDropLabel);
+            ticker = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromMilliseconds(40) };
+            ticker.Tick += delegate { AnimateFace(); };
+            IsVisibleChanged += delegate { UpdateTicker(); };
+            Loaded += delegate { UpdateTicker(); };
+            Unloaded += delegate { ticker.Stop(); };
         }
         protected override int VisualChildrenCount { get { return children.Count; } }
         protected override Visual GetVisualChild(int index) { return children[index]; }
-        protected override Size MeasureOverride(Size available) { countdown.Measure(new Size(68, 28)); fileDropLabel.Measure(new Size(66, 34)); return new Size(88, 88); }
-        protected override Size ArrangeOverride(Size finalSize) { countdown.Arrange(new Rect(10, 30, 68, 28)); fileDropLabel.Arrange(new Rect(11, 28, 66, 34)); return finalSize; }
+        protected override Size MeasureOverride(Size available) { fileDropLabel.Measure(new Size(66, 34)); return new Size(88, 88); }
+        protected override Size ArrangeOverride(Size finalSize) { fileDropLabel.Arrange(new Rect(11, 28, 66, 34)); return finalSize; }
         internal void SetFileDropState(bool ready, string feedback, bool error)
         {
             if (fileDropReady == ready && fileDropFeedback == feedback && fileDropError == error) return;
@@ -1015,70 +1034,130 @@ namespace Orbit
             fileDropLabel.Text = ready ? "松开放入\n锁定槽" : feedback == null ? String.Empty : feedback + (error ? "\n请重试" : "\n锁定槽");
             fileDropLabel.Foreground = Display.Brush(error ? "#E9B4A8" : "#F0D49A");
             fileDropLabel.Visibility = showing ? Visibility.Visible : Visibility.Collapsed;
-            countdown.Visibility = showing ? Visibility.Collapsed : Visibility.Visible;
             BeginAnimation(FileDropMorphProperty, new DoubleAnimation(showing ? 1 : 0, TimeSpan.FromMilliseconds(140))
             {
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
             });
+            UpdateTicker();
             InvalidateVisual();
         }
+
+        internal void SetGazeForTest(Point offset)
+        {
+            testGaze = new Vector(offset.X, offset.Y);
+            UpdateTicker();
+        }
+
         internal void Refresh()
         {
-            var task = app.Engine.ActiveTask;
-            countdown.Text = task == null ? "" : Display.Time(task.RemainingSeconds);
-            countdown.FontSize = task != null && task.RemainingSeconds >= 3600 ? 12 : 14;
+            bool next = app.Engine.ActiveTask != null || app.Engine.AlertTask != null;
+            if (next != wantsTimer)
+            {
+                morphFrom = timerMix;
+                morphStarted = clock.Elapsed.TotalSeconds;
+                wantsTimer = next;
+            }
+            if (!AnimationsEnabled) timerMix = wantsTimer ? 1 : 0;
+            UpdateTicker();
             InvalidateVisual();
+        }
+
+        private bool AnimationsEnabled { get { return app.IsTest || SystemParameters.ClientAreaAnimation; } }
+
+        private void UpdateTicker()
+        {
+            double targetMix = wantsTimer ? 1 : 0;
+            bool animate = IsLoaded && IsVisible && AnimationsEnabled && !fileDropReady && fileDropFeedback == null &&
+                (timerMix != targetMix || !wantsTimer);
+            if (animate && !ticker.IsEnabled)
+            {
+                lastFrame = clock.Elapsed.TotalSeconds;
+                ticker.Start();
+            }
+            else if (!animate) ticker.Stop();
+        }
+
+        private void AnimateFace()
+        {
+            double now = clock.Elapsed.TotalSeconds;
+            double elapsed = Math.Max(0, Math.Min(.10, now - lastFrame));
+            lastFrame = now;
+            double goal = wantsTimer ? 1 : 0;
+            if (timerMix != goal)
+            {
+                double progress = Math.Min(1, (now - morphStarted) / TimerMorphSeconds);
+                timerMix = progress >= 1 ? goal : morphFrom + (goal - morphFrom) * progress * progress * (3 - 2 * progress);
+            }
+            if (!wantsTimer)
+            {
+                Vector target = TargetGaze();
+                gaze += (target - gaze) * (1 - Math.Exp(-elapsed / .09));
+            }
+            orbitAngle = (orbitAngle + elapsed * Math.PI * 2 / OrbitSeconds) % (Math.PI * 2);
+            openness = OpenEye(now);
+            UpdateTicker();
+            InvalidateVisual();
+        }
+
+        private Vector TargetGaze()
+        {
+            if (app.IsTest) return testGaze;
+            if (PresentationSource.FromVisual(this) == null) return new Vector();
+            Point pointer = PointFromScreen(NativeDesktop.CursorPosition);
+            Vector offset = pointer - new Point(44, 44);
+            double distance = offset.Length;
+            if (distance < .1 || distance >= 285) return new Vector();
+            double falloff = Math.Min(1, (285 - distance) / 150);
+            return offset * (Math.Min(13.4, distance * .31) * falloff / distance);
+        }
+
+        private double OpenEye(double now)
+        {
+            if (wantsTimer || app.IsTest)
+            {
+                blinkStarted = -1;
+                nextBlink = now + 4.5;
+                return 1;
+            }
+            if (blinkStarted < 0 && now >= nextBlink) blinkStarted = now;
+            if (blinkStarted < 0) return 1;
+            double age = now - blinkStarted;
+            if (age < .064) return 1 - age / .064;
+            if (age < .102) return 0;
+            if (age < BlinkSeconds) return 1 - Math.Pow(1 - (age - .102) / (BlinkSeconds - .102), 2);
+            blinkStarted = -1;
+            nextBlink = now + 4.8 + blinkInterval.NextDouble() * 3.8;
+            return 1;
         }
 
         protected override void OnRender(DrawingContext dc)
         {
-            var center = new Point(44, 44);
             double morph = Math.Max(0, Math.Min(1, (double)GetValue(FileDropMorphProperty)));
             dc.DrawRectangle(Display.Brush("#02000000"), null, new Rect(0, 0, ActualWidth, ActualHeight));
+            if (morph < 1)
+            {
+                var task = app.Engine.ActiveTask;
+                var alert = app.Engine.AlertTask;
+                double progress = task == null ? 1 : Math.Max(0, Math.Min(1, task.RemainingSeconds / task.DurationSeconds));
+                if (morph > 0) dc.PushOpacity(1 - morph);
+                face.Draw(dc, new Point(gaze.X, gaze.Y), openness, orbitAngle, timerMix, progress,
+                    task == null ? String.Empty : Display.Time(task.RemainingSeconds),
+                    task != null && task.Status == OrbitTaskStatus.Paused, alert != null);
+                if (morph > 0) dc.Pop();
+            }
+            if (morph == 0) return;
+            dc.PushOpacity(morph);
             dc.DrawRoundedRectangle(Display.Brush("#13141A"), null, new Rect(9, 11, 70, 70), 35 - 18 * morph, 35 - 18 * morph);
             var shell = new LinearGradientBrush(Blend("#34353F", "#3A3328", morph), Blend("#202128", "#24211D", morph), new Point(0, 0), new Point(1, 1));
             var edge = new SolidColorBrush(Blend("#51505F", fileDropError ? "#BC897A" : "#CDA65D", morph));
             dc.DrawRoundedRectangle(shell, new Pen(edge, 1 + .35 * morph), new Rect(10, 10, 68, 68), 34 - 18 * morph, 34 - 18 * morph);
-            if (fileDropReady || fileDropFeedback != null) return;
-            var task = app.Engine.ActiveTask;
-            if (app.Engine.AlertTask != null)
-            {
-                dc.DrawEllipse(null, new Pen(Display.Brush("#9DC9AE"), 2), center, 29, 29);
-                var check = new Pen(Display.Brush("#BDE2CA"), 2.2) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round };
-                var mark = new StreamGeometry();
-                using (var g = mark.Open()) { g.BeginFigure(new Point(36, 44), false, false); g.LineTo(new Point(42, 50), true, false); g.LineTo(new Point(53, 38), true, false); }
-                dc.DrawGeometry(null, check, mark);
-            }
-            else if (task != null)
-            {
-                dc.DrawEllipse(null, new Pen(Display.Brush("#42404D"), 2), center, 29, 29);
-                double ratio = Math.Max(0, Math.Min(1, task.RemainingSeconds / task.DurationSeconds));
-                DrawArc(dc, center, 29, ratio, task.Status == OrbitTaskStatus.Paused ? "#87838F" : "#8EDBD5");
-            }
-            else
-            {
-                dc.DrawEllipse(null, new Pen(Display.Brush("#DDDAE3"), 1.5), center, 15, 15);
-                dc.DrawEllipse(Display.Brush("#E78A7A"), null, center, 5, 5);
-                dc.DrawEllipse(Display.Brush("#DDDAE3"), null, new Point(56, 35), 2.4, 2.4);
-            }
+            dc.Pop();
         }
 
         private static Color Blend(string from, string to, double ratio)
         {
             Color a = (Color)ColorConverter.ConvertFromString(from), b = (Color)ColorConverter.ConvertFromString(to);
             return Color.FromRgb((byte)(a.R + (b.R - a.R) * ratio), (byte)(a.G + (b.G - a.G) * ratio), (byte)(a.B + (b.B - a.B) * ratio));
-        }
-
-        private static void DrawArc(DrawingContext dc, Point c, double radius, double ratio, string color)
-        {
-            if (ratio <= 0) return;
-            var pen = new Pen(Display.Brush(color), 2) { StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round };
-            if (ratio >= .9999) { dc.DrawEllipse(null, pen, c, radius, radius); return; }
-            double angle = ratio * Math.PI * 2 - Math.PI / 2;
-            var end = new Point(c.X + radius * Math.Cos(angle), c.Y + radius * Math.Sin(angle));
-            var geometry = new StreamGeometry();
-            using (var ctx = geometry.Open()) { ctx.BeginFigure(new Point(c.X, c.Y - radius), false, false); ctx.ArcTo(end, new Size(radius, radius), 0, ratio > .5, SweepDirection.Clockwise, true, false); }
-            geometry.Freeze(); dc.DrawGeometry(null, pen, geometry);
         }
 
     }

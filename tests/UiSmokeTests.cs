@@ -28,6 +28,8 @@ namespace Orbit
                 var working = Placement.WorkArea(app.Dot);
                 Placement.Move(app.Dot, working.Left + working.Width / 2 - 38, working.Top + 45);
                 Check(app.Dot.IsVisible && app.Dot.Topmost && !app.Dot.ShowInTaskbar, "Native dot remains an independent topmost window");
+                app.Dot.SetGazeForTest(new Point(10, -8));
+                CheckLedOrb(app, output, "00-led-idle-right-up.png", true);
                 app.PreviewLauncher(); Pump();
                 Check(app.Launcher.IsVisible && app.LauncherIsPreview && !app.ToolsArePinned && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Hover preview reveals only the three-tool launcher");
                 app.DismissPreviewForTest(false); Pump();
@@ -85,6 +87,7 @@ namespace Orbit
                 Click(playControl);
                 Check(app.Engine.ActiveTask == timed && timed.Status == OrbitTaskStatus.Running, "Row play button starts its timer");
                 Check(Object.ReferenceEquals(playControl, ById<Button>(app.Panel, "task-" + timed.Id + "-play")), "Starting a timer preserves its button so the click animation can finish");
+                CheckLedOrb(app, output, "03-led-running.png", false);
                 var editControl = ById<Button>(app.Panel, "task-" + timed.Id + "-edit");
                 var restartControl = ById<Button>(app.Panel, "task-" + timed.Id + "-restart");
                 var timedCompleteControl = ById<Button>(app.Panel, "task-" + timed.Id + "-complete");
@@ -107,6 +110,7 @@ namespace Orbit
                 Click(ById<Button>(app.Panel, "task-" + timed.Id + "-play"));
                 double remaining = timed.RemainingSeconds; now = now.AddMinutes(2); app.Pulse();
                 Check(timed.Status == OrbitTaskStatus.Paused && timed.RemainingSeconds == remaining, "Row pause control preserves the remaining duration");
+                CheckLedOrb(app, output, "03-led-paused.png", false);
                 Click(ById<Button>(app.Panel, "task-" + timed.Id + "-play"));
                 Check(timed.Status == OrbitTaskStatus.Running, "The same row button resumes the timer");
                 app.ClickDot();
@@ -584,7 +588,8 @@ namespace Orbit
             Check(accepted && app.Dot.IsReceivingFileDrop && !app.Launcher.IsVisible && !app.Utilities.IsVisible && Placement.Rectangle(app.Dot) == bounds && FindText(app.Dot, "松开放入"), "File drag previews on the closed orb without opening tools or changing its native bounds");
             Capture(app.Dot, Path.Combine(output, "15-orb-file-drop.png"));
             app.Dot.CancelFileDropPreview(); Pump();
-            Check(!app.Dot.IsReceivingFileDrop && active != null && app.Engine.ActiveTask == active && active.Status == OrbitTaskStatus.Running && active.DueAtUtc == deadline && FindFirst<TextBlock>(app.Dot).Visibility == Visibility.Visible && Placement.Rectangle(app.Dot) == bounds, "Cancelling the orb drop preview restores the countdown without changing its active timer or deadline");
+            Check(!app.Dot.IsReceivingFileDrop && active != null && app.Engine.ActiveTask == active && active.Status == OrbitTaskStatus.Running && active.DueAtUtc == deadline && Placement.Rectangle(app.Dot) == bounds, "Cancelling the orb drop preview preserves the active timer, deadline and window bounds");
+            CheckLedOrb(app, output, "15-led-restored-after-drop.png", false);
             Check(app.Dot.ReceiveFileDrop(data, DragDropEffects.Copy) && app.ClipboardHistory.LockedEntry.IsFile && !app.Utilities.IsVisible,
                 "Dropping into an empty pin locks the file directly from the closed orb");
             string firstPinId = app.ClipboardHistory.LockedEntry.Id;
@@ -813,6 +818,51 @@ namespace Orbit
             return null;
         }
         private static void Pump() { var frame = new DispatcherFrame(); Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(delegate { frame.Continue = false; })); Dispatcher.PushFrame(frame); }
+        private static void CheckLedOrb(AppController app, string output, string fileName, bool idle)
+        {
+            app.Dot.UpdateLayout();
+            var bounds = Placement.Rectangle(app.Dot);
+            var active = app.Engine.ActiveTask;
+            DateTimeOffset? deadline = active == null ? null : active.DueAtUtc;
+            OrbitTaskStatus? status = active == null ? (OrbitTaskStatus?)null : active.Status;
+            var frame = new DispatcherFrame();
+            DispatcherTimer midpoint = null;
+            if (fileName == "03-led-running.png")
+            {
+                midpoint = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(320) };
+                midpoint.Tick += delegate { midpoint.Stop(); Capture(app.Dot, Path.Combine(output, "03-led-transition.png")); };
+                midpoint.Start();
+            }
+            var settle = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(850) };
+            settle.Tick += delegate { settle.Stop(); frame.Continue = false; };
+            settle.Start(); Dispatcher.PushFrame(frame);
+            if (midpoint != null) midpoint.Stop();
+            app.Dot.UpdateLayout();
+            var dpi = VisualTreeHelper.GetDpi(app.Dot);
+            var bitmap = new RenderTargetBitmap((int)Math.Ceiling(app.Dot.ActualWidth * dpi.DpiScaleX), (int)Math.Ceiling(app.Dot.ActualHeight * dpi.DpiScaleY), dpi.PixelsPerInchX, dpi.PixelsPerInchY, PixelFormats.Pbgra32);
+            bitmap.Render(app.Dot); Save(bitmap, Path.Combine(output, fileName));
+            int stride = bitmap.PixelWidth * 4;
+            var pixels = new byte[stride * bitmap.PixelHeight];
+            bitmap.CopyPixels(pixels, stride, 0);
+            int red = 0, cyan = 0;
+            // Sample the LED face, excluding the metallic shell. Channel ratios
+            // tolerate antialiasing, DPI scaling and the paused state's dimming.
+            for (int y = (int)Math.Ceiling(18 * dpi.DpiScaleY); y < Math.Min(bitmap.PixelHeight, (int)Math.Floor(70 * dpi.DpiScaleY)); y++)
+                for (int x = (int)Math.Ceiling(18 * dpi.DpiScaleX); x < Math.Min(bitmap.PixelWidth, (int)Math.Floor(70 * dpi.DpiScaleX)); x++)
+                {
+                    int offset = y * stride + x * 4;
+                    int b = pixels[offset], g = pixels[offset + 1], r = pixels[offset + 2];
+                    if (r >= 120 && r - g >= 45 && r - b >= 35) red++;
+                    if (g >= 90 && b >= 90 && g - r >= 25 && b - r >= 15) cyan++;
+                }
+            int minimum = (int)Math.Ceiling(10 * dpi.DpiScaleX * dpi.DpiScaleY);
+            report.AppendLine("LED " + fileName + ": red=" + red + ", cyan=" + cyan + ", minimum=" + minimum);
+            Check(idle ? red >= minimum && cyan < minimum : cyan >= minimum && red < minimum,
+                fileName + (idle ? ": settled idle eye displays red LEDs" : ": settled countdown displays cyan LEDs without the idle red eye"));
+            Check(Math.Abs(app.Dot.ActualWidth - 88) < .1 && Math.Abs(app.Dot.ActualHeight - 88) < .1 && Placement.Rectangle(app.Dot) == bounds && app.Engine.ActiveTask == active && (active == null || (active.Status == status && active.DueAtUtc == deadline)),
+                fileName + ": LED animation preserves the 88-DIP window, task state and countdown deadline");
+        }
+
         private static void Capture(FrameworkElement element, string path)
         {
             element.UpdateLayout();
