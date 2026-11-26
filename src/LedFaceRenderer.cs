@@ -23,8 +23,9 @@ namespace Orbit
         private static readonly Color Lilac = Color.FromRgb(177, 155, 211);
         private static readonly Color Teal = Color.FromRgb(112, 206, 193);
         private static readonly ImageBrush LensMask = CreateLensMask();
-        private static readonly BitmapSource BaseLayer = CreateBase();
-        private static readonly BitmapSource GlassLayer = CreateGlass();
+        private static readonly BitmapSource UnlitLenses = CreateUnlitLenses();
+        private static readonly DrawingGroup BaseLayer = CreateBase();
+        private static readonly DrawingGroup GlassLayer = CreateGlass();
         private static readonly Brush EyeLight = CreateEyeLight();
         private static readonly Brush TimerTextLight = Solid(Color.FromRgb(156, 224, 213));
         private static readonly Brush CompletionLight = Solid(Color.FromRgb(157, 223, 198));
@@ -44,7 +45,7 @@ namespace Orbit
             double gazeScale = (SurfaceRadius - EyeRingRadius - MarkerRadius - .45) / Math.Max(MaxGazeOffset, gazeLength);
             Point eyeCenter = new Point(Center.X + gx * gazeScale, Center.Y + gy * gazeScale);
 
-            dc.DrawImage(BaseLayer, Bounds);
+            dc.DrawDrawing(BaseLayer);
             // Absolute 88-DIP mask coordinates prevent any moving shape from
             // rescaling or translating the honeycomb sampling array.
             dc.PushOpacityMask(LensMask);
@@ -104,7 +105,7 @@ namespace Orbit
             }
             dc.Pop();
             // The glass remains above the emitted light, including during blinks.
-            dc.DrawImage(GlassLayer, Bounds);
+            dc.DrawDrawing(GlassLayer);
         }
 
         private void EnsureTimeGeometry(string text)
@@ -155,11 +156,31 @@ namespace Orbit
             return mask;
         }
 
-        private static BitmapSource CreateBase()
+        private static BitmapSource CreateUnlitLenses()
+        {
+            var drawing = new DrawingGroup();
+            using (DrawingContext dc = drawing.Open())
+            {
+                dc.PushOpacityMask(LensMask);
+                dc.DrawRectangle(Solid(Color.FromArgb(32, 70, 70, 88)), null, Bounds);
+                dc.Pop();
+            }
+            drawing.Freeze();
+            return Rasterize(drawing);
+        }
+
+        private static DrawingGroup CreateBase()
         {
             DrawingGroup drawing = new DrawingGroup();
             using (DrawingContext dc = drawing.Open())
             {
+                // Keep the silhouette vector all the way to the display so WPF
+                // can antialias it at the current DPI and animation scale.
+                var outerEdge = new LinearGradientBrush(Color.FromRgb(82, 85, 103),
+                    Color.FromRgb(43, 48, 62), new Point(0, 0), new Point(1, 1));
+                outerEdge.Freeze();
+                dc.DrawEllipse(outerEdge, null, Center, OuterRadius, OuterRadius);
+
                 // Build the recessed bevel inward from the original silhouette.
                 LinearGradientBrush metal = new LinearGradientBrush();
                 metal.StartPoint = new Point(0, 0);
@@ -171,13 +192,13 @@ namespace Orbit
                 metal.GradientStops.Add(new GradientStop(Color.FromRgb(47, 53, 66), 0.83));
                 metal.GradientStops.Add(new GradientStop(Color.FromRgb(82, 86, 101), 1));
                 metal.Freeze();
-                double edgeRadius = OuterRadius - .35;
-                dc.DrawEllipse(metal, Stroke(Solid(Color.FromRgb(15, 19, 28)), .7), Center, edgeRadius, edgeRadius);
+                double bevelRadius = OuterRadius - .55;
+                dc.DrawEllipse(metal, null, Center, bevelRadius, bevelRadius);
                 LinearGradientBrush metalLip = new LinearGradientBrush(Color.FromRgb(151, 149, 171),
                     Color.FromRgb(65, 70, 86), new Point(0, 0), new Point(1, 1));
                 metalLip.Freeze();
-                double lipRadius = OuterRadius - .75;
-                dc.DrawEllipse(null, Stroke(metalLip, .55), Center, lipRadius, lipRadius);
+                double lipRadius = OuterRadius - 1.05;
+                dc.DrawEllipse(null, Stroke(metalLip, .6), Center, lipRadius, lipRadius);
                 // The dark inner channel separates the metal lip from the canopy.
                 double channelRadius = SurfaceRadius + .65;
                 dc.DrawEllipse(Solid(Color.FromRgb(11, 15, 22)),
@@ -188,16 +209,14 @@ namespace Orbit
                 graphite.RadiusX = graphite.RadiusY = 0.66;
                 graphite.Freeze();
                 dc.DrawEllipse(graphite, null, Center, SurfaceRadius, SurfaceRadius);
-                dc.PushOpacityMask(LensMask);
                 // Unlit lenses are visible only as a very faint physical texture.
-                dc.DrawRectangle(Solid(Color.FromArgb(32, 70, 70, 88)), null, Bounds);
-                dc.Pop();
+                dc.DrawImage(UnlitLenses, Bounds);
             }
             drawing.Freeze();
-            return Rasterize(drawing);
+            return drawing;
         }
 
-        private static BitmapSource CreateGlass()
+        private static DrawingGroup CreateGlass()
         {
             DrawingGroup drawing = new DrawingGroup();
             using (DrawingContext dc = drawing.Open())
@@ -240,7 +259,7 @@ namespace Orbit
                 dc.DrawGeometry(null, Stroke(edgeReflection, 0.8), canopyEdge);
             }
             drawing.Freeze();
-            return Rasterize(drawing);
+            return drawing;
         }
 
         private static BitmapSource Rasterize(Drawing drawing)
