@@ -437,9 +437,20 @@ namespace Orbit
             public int Y;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct LastInput
+        {
+            public uint Size;
+            public uint Tick;
+        }
+
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool GetCursorPos(out NativePoint point);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetLastInputInfo(ref LastInput input);
 
         [DllImport("user32.dll")]
         public static extern IntPtr GetForegroundWindow();
@@ -464,6 +475,12 @@ namespace Orbit
                 NativePoint point;
                 return GetCursorPos(out point) ? new Point(point.X, point.Y) : new Point(0, 0);
             }
+        }
+
+        internal static bool InputIdleFor(uint milliseconds)
+        {
+            var input = new LastInput { Size = (uint)Marshal.SizeOf(typeof(LastInput)) };
+            return GetLastInputInfo(ref input) && unchecked((uint)Environment.TickCount - input.Tick) >= milliseconds;
         }
 
         /// <summary>Call after SourceInitialized; the task panel should remain normally activatable.</summary>

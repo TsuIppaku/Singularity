@@ -48,7 +48,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Clipboard drag interop test compilation failed
 & $clipboardDragInteropExe
 if ($LASTEXITCODE -ne 0) { throw 'Clipboard drag interop tests failed.' }
 $exe = Join-Path $outputDir 'Orbit.exe'
-$sources = @($corePath,(Join-Path $projectDir 'src\PlatformServices.cs'),(Join-Path $projectDir 'src\DesktopApp.cs'),(Join-Path $projectDir 'src\LedFaceRenderer.cs'),(Join-Path $projectDir 'src\PopupLayout.cs'),(Join-Path $projectDir 'src\LauncherWindow.cs'),(Join-Path $projectDir 'src\TaskPanel.cs'),(Join-Path $projectDir 'src\UtilityPanels.cs'),(Join-Path $projectDir 'src\ClipboardHistory.cs'),(Join-Path $projectDir 'src\ClipboardMonitor.cs'),(Join-Path $projectDir 'src\ClipboardDragExport.cs'),(Join-Path $projectDir 'tests\UiSmokeTests.cs'))
+$sources = @($corePath,(Join-Path $projectDir 'src\PlatformServices.cs'),(Join-Path $projectDir 'src\DesktopApp.cs'),(Join-Path $projectDir 'src\LedFaceRenderer.cs'),(Join-Path $projectDir 'src\IdleEyeMotion.cs'),(Join-Path $projectDir 'src\PopupLayout.cs'),(Join-Path $projectDir 'src\LauncherWindow.cs'),(Join-Path $projectDir 'src\TaskPanel.cs'),(Join-Path $projectDir 'src\UtilityPanels.cs'),(Join-Path $projectDir 'src\ClipboardHistory.cs'),(Join-Path $projectDir 'src\ClipboardMonitor.cs'),(Join-Path $projectDir 'src\ClipboardDragExport.cs'),(Join-Path $projectDir 'tests\UiSmokeTests.cs'))
 & $compiler @common /target:winexe /main:Orbit.Program ('/out:' + $exe) ('/win32manifest:' + (Join-Path $projectDir 'src\app.manifest')) ('/resource:' + (Join-Path $projectDir 'src\Panel.xaml') + ',Orbit.Panel.xaml') @sources
 if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed.' }
 Copy-Item -LiteralPath (Join-Path $projectDir 'src\Orbit.exe.config') -Destination $outputDir -Force

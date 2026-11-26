@@ -10,6 +10,7 @@ namespace Orbit
     // and a transparent glass coating. Lens geometry never follows the gaze.
     internal sealed class LedFaceRenderer
     {
+        internal const double MaxGazeOffset = 21.2;
         private const double FaceSize = 88;
         private const double SurfaceRadius = 36.5;
         private const double EyeRadius = 10.7;
@@ -37,7 +38,7 @@ namespace Orbit
             double mix = Unit(timerMix), ratio = Unit(remainingRatio), open = Unit(openness);
             double gx = Finite(gazeOffset.X), gy = Finite(gazeOffset.Y);
             double gazeLength = Math.Sqrt(gx * gx + gy * gy);
-            if (gazeLength > 14) { gx *= 14 / gazeLength; gy *= 14 / gazeLength; }
+            if (gazeLength > MaxGazeOffset) { gx *= MaxGazeOffset / gazeLength; gy *= MaxGazeOffset / gazeLength; }
             Point eyeCenter = new Point(Center.X + gx, Center.Y + gy);
 
             dc.DrawImage(BaseLayer, Bounds);
@@ -156,6 +157,26 @@ namespace Orbit
             DrawingGroup drawing = new DrawingGroup();
             using (DrawingContext dc = drawing.Open())
             {
+                // A continuous physical bezel stays readable on either light or
+                // dark desktops. Its shallow bevel surrounds, not masks, the LEDs.
+                LinearGradientBrush metal = new LinearGradientBrush();
+                metal.StartPoint = new Point(0, 0);
+                metal.EndPoint = new Point(1, 1);
+                metal.GradientStops.Add(new GradientStop(Color.FromRgb(114, 117, 135), 0));
+                metal.GradientStops.Add(new GradientStop(Color.FromRgb(69, 74, 89), 0.26));
+                metal.GradientStops.Add(new GradientStop(Color.FromRgb(43, 48, 61), 0.48));
+                metal.GradientStops.Add(new GradientStop(Color.FromRgb(84, 85, 104), 0.62));
+                metal.GradientStops.Add(new GradientStop(Color.FromRgb(47, 53, 66), 0.83));
+                metal.GradientStops.Add(new GradientStop(Color.FromRgb(82, 86, 101), 1));
+                metal.Freeze();
+                dc.DrawEllipse(metal, Stroke(Solid(Color.FromRgb(15, 19, 28)), 0.7), Center, 39.3, 39.3);
+                LinearGradientBrush metalLip = new LinearGradientBrush(Color.FromRgb(151, 149, 171),
+                    Color.FromRgb(65, 70, 86), new Point(0, 0), new Point(1, 1));
+                metalLip.Freeze();
+                dc.DrawEllipse(null, Stroke(metalLip, 0.55), Center, 38.9, 38.9);
+                // The dark inner channel separates the metal lip from the canopy.
+                dc.DrawEllipse(Solid(Color.FromRgb(11, 15, 22)),
+                    Stroke(Solid(Color.FromRgb(42, 46, 59)), 0.65), Center, 37.15, 37.15);
                 RadialGradientBrush graphite = new RadialGradientBrush(Color.FromRgb(30, 33, 42), Color.FromRgb(19, 22, 29));
                 graphite.GradientOrigin = new Point(0.32, 0.22);
                 graphite.Center = new Point(0.5, 0.5);
@@ -188,14 +209,30 @@ namespace Orbit
                     Color.FromArgb(5, 88, 107, 128), new Point(0, 0.78), new Point(0, 1));
                 lower.Freeze();
                 dc.DrawEllipse(lower, null, Center, SurfaceRadius - 0.5, SurfaceRadius - 0.5);
-                RadialGradientBrush glint = new RadialGradientBrush();
-                glint.GradientStops.Add(new GradientStop(Color.FromArgb(72, 233, 229, 248), 0));
-                glint.GradientStops.Add(new GradientStop(Color.FromArgb(28, 221, 218, 240), 0.45));
-                glint.GradientStops.Add(new GradientStop(Color.FromArgb(0, 221, 218, 240), 1));
-                glint.Freeze();
-                dc.PushTransform(new RotateTransform(-37, 28, 20));
-                dc.DrawEllipse(glint, null, new Point(28, 20), 5.6, 1.6);
+                // A faint reflection follows the upper-left canopy edge; there
+                // is no detached highlight floating over the lens array.
+                LinearGradientBrush edgeReflection = new LinearGradientBrush();
+                edgeReflection.StartPoint = new Point(0, 1);
+                edgeReflection.EndPoint = new Point(1, 0);
+                edgeReflection.GradientStops.Add(new GradientStop(Color.FromArgb(0, 204, 203, 228), 0));
+                edgeReflection.GradientStops.Add(new GradientStop(Color.FromArgb(46, 204, 203, 228), 0.28));
+                edgeReflection.GradientStops.Add(new GradientStop(Color.FromArgb(28, 204, 203, 228), 0.62));
+                edgeReflection.GradientStops.Add(new GradientStop(Color.FromArgb(0, 204, 203, 228), 1));
+                edgeReflection.Freeze();
+                StreamGeometry canopyEdge = new StreamGeometry();
+                double start = -167 * Math.PI / 180, end = -62 * Math.PI / 180;
+                const double canopyRadius = 34.8;
+                using (StreamGeometryContext edge = canopyEdge.Open())
+                {
+                    edge.BeginFigure(new Point(Center.X + canopyRadius * Math.Cos(start), Center.Y + canopyRadius * Math.Sin(start)), false, false);
+                    edge.ArcTo(new Point(Center.X + canopyRadius * Math.Cos(end), Center.Y + canopyRadius * Math.Sin(end)),
+                        new Size(canopyRadius, canopyRadius), 0, false, SweepDirection.Clockwise, true, false);
+                }
+                canopyEdge.Freeze();
+                dc.PushOpacity(0.25);
+                dc.DrawGeometry(null, Stroke(edgeReflection, 2.2), canopyEdge);
                 dc.Pop();
+                dc.DrawGeometry(null, Stroke(edgeReflection, 0.8), canopyEdge);
             }
             drawing.Freeze();
             return Rasterize(drawing);

@@ -28,6 +28,10 @@ namespace Orbit
                 var working = Placement.WorkArea(app.Dot);
                 Placement.Move(app.Dot, working.Left + working.Width / 2 - 38, working.Top + 45);
                 Check(app.Dot.IsVisible && app.Dot.Topmost && !app.Dot.ShowInTaskbar, "Native dot remains an independent topmost window");
+                app.Dot.SetPointerOffsetForTest(new Point(-93, 0));
+                CheckLedOrb(app, output, "00-led-idle-near-left.png", true, 26);
+                app.Dot.SetPointerOffsetForTest(new Point(-2800, 0));
+                CheckLedOrb(app, output, "00-led-idle-distant-centered.png", true, 48, 40);
                 app.Dot.SetGazeForTest(new Point(10, -8));
                 CheckLedOrb(app, output, "00-led-idle-right-up.png", true);
                 app.PreviewLauncher(); Pump();
@@ -818,7 +822,7 @@ namespace Orbit
             return null;
         }
         private static void Pump() { var frame = new DispatcherFrame(); Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(delegate { frame.Continue = false; })); Dispatcher.PushFrame(frame); }
-        private static void CheckLedOrb(AppController app, string output, string fileName, bool idle)
+        private static void CheckLedOrb(AppController app, string output, string fileName, bool idle, double? maxRedCentroidX = null, double? minRedCentroidX = null)
         {
             app.Dot.UpdateLayout();
             var bounds = Placement.Rectangle(app.Dot);
@@ -845,20 +849,31 @@ namespace Orbit
             var pixels = new byte[stride * bitmap.PixelHeight];
             bitmap.CopyPixels(pixels, stride, 0);
             int red = 0, cyan = 0;
-            // Sample the LED face, excluding the metallic shell. Channel ratios
-            // tolerate antialiasing, DPI scaling and the paused state's dimming.
-            for (int y = (int)Math.Ceiling(18 * dpi.DpiScaleY); y < Math.Min(bitmap.PixelHeight, (int)Math.Floor(70 * dpi.DpiScaleY)); y++)
-                for (int x = (int)Math.Ceiling(18 * dpi.DpiScaleX); x < Math.Min(bitmap.PixelWidth, (int)Math.Floor(70 * dpi.DpiScaleX)); x++)
+            double redXSum = 0;
+            // The wider edge-gaze sample includes the entire displaced pupil,
+            // avoiding a clipped sample that would bias its centroid inward.
+            double sampleMin = maxRedCentroidX.HasValue ? 8 : 18;
+            double sampleMax = maxRedCentroidX.HasValue ? 80 : 70;
+            // Channel differences tolerate antialiasing, DPI and paused dimming.
+            for (int y = (int)Math.Ceiling(sampleMin * dpi.DpiScaleY); y < Math.Min(bitmap.PixelHeight, (int)Math.Floor(sampleMax * dpi.DpiScaleY)); y++)
+                for (int x = (int)Math.Ceiling(sampleMin * dpi.DpiScaleX); x < Math.Min(bitmap.PixelWidth, (int)Math.Floor(sampleMax * dpi.DpiScaleX)); x++)
                 {
                     int offset = y * stride + x * 4;
                     int b = pixels[offset], g = pixels[offset + 1], r = pixels[offset + 2];
-                    if (r >= 120 && r - g >= 45 && r - b >= 35) red++;
+                    if (r >= 120 && r - g >= 45 && r - b >= 35) { red++; redXSum += (x + .5) / dpi.DpiScaleX; }
                     if (g >= 90 && b >= 90 && g - r >= 25 && b - r >= 15) cyan++;
                 }
             int minimum = (int)Math.Ceiling(10 * dpi.DpiScaleX * dpi.DpiScaleY);
             report.AppendLine("LED " + fileName + ": red=" + red + ", cyan=" + cyan + ", minimum=" + minimum);
             Check(idle ? red >= minimum && cyan < minimum : cyan >= minimum && red < minimum,
                 fileName + (idle ? ": settled idle eye displays red LEDs" : ": settled countdown displays cyan LEDs without the idle red eye"));
+            if (maxRedCentroidX.HasValue)
+            {
+                double centroidX = red == 0 ? Double.NaN : redXSum / red;
+                report.AppendLine("LED " + fileName + ": red centroid X=" + centroidX.ToString("0.00") + " DIP");
+                Check(red > 0 && centroidX < maxRedCentroidX.Value && (!minRedCentroidX.HasValue || centroidX >= minRedCentroidX.Value),
+                    minRedCentroidX.HasValue ? "A distant pointer leaves the idle LED eye centered instead of following across the desktop" : "A nearby pointer can move the LED eye close to the left face edge");
+            }
             Check(Math.Abs(app.Dot.ActualWidth - 88) < .1 && Math.Abs(app.Dot.ActualHeight - 88) < .1 && Placement.Rectangle(app.Dot) == bounds && app.Engine.ActiveTask == active && (active == null || (active.Status == status && active.DueAtUtc == deadline)),
                 fileName + ": LED animation preserves the 88-DIP window, task state and countdown deadline");
         }

@@ -851,6 +851,7 @@ namespace Orbit
         internal bool IsReceivingFileDrop { get; private set; }
 
         internal void SetGazeForTest(Point offset) { if (app.IsTest) visual.SetGazeForTest(offset); }
+        internal void SetPointerOffsetForTest(Point offset) { if (app.IsTest) visual.SetPointerOffsetForTest(offset); }
 
         internal DotWindow(AppController app)
         {
@@ -962,7 +963,8 @@ namespace Orbit
             if (!pressed) return;
             bool click = !dragged; pressed = false; ReleaseMouseCapture();
             Placement.Clamp(this);
-            if (click) app.ClickDot(); else app.Moved();
+            if (click) { visual.BlinkOnClick(); app.ClickDot(); }
+            else app.Moved();
             e.Handled = true;
         }
 
@@ -980,6 +982,9 @@ namespace Orbit
         private const double TimerMorphSeconds = .64;
         private const double OrbitSeconds = 17;
         private const double BlinkSeconds = .235;
+        private const double FollowRadius = 175;
+        private const double ClickBlinkLength = .145;
+        private const double ClickBlinkGap = .055;
         private static readonly DependencyProperty FileDropMorphProperty = DependencyProperty.Register(
             "FileDropMorph", typeof(double), typeof(DotVisual), new FrameworkPropertyMetadata(0.0, FrameworkPropertyMetadataOptions.AffectsRender));
         private readonly AppController app;
@@ -988,12 +993,18 @@ namespace Orbit
         private readonly LedFaceRenderer face = new LedFaceRenderer();
         private readonly Stopwatch clock = Stopwatch.StartNew();
         private readonly DispatcherTimer ticker;
-        private readonly Random blinkInterval = new Random();
+        private readonly Random motionRandom = new Random();
         private Vector gaze, testGaze;
+        private Vector? testPointerOffset;
         private double orbitAngle = -.85;
         private double openness = 1;
         private double nextBlink = 5;
         private double blinkStarted = -1;
+        private double clickBlinkStarted = -1;
+        private double nextIdle = 10;
+        private double idleStarted;
+        private double idleInputCheck;
+        private IdleEyeGesture? idleGesture;
         private double lastFrame;
         private double timerMix;
         private double morphFrom, morphStarted;
@@ -1034,6 +1045,11 @@ namespace Orbit
             fileDropLabel.Text = ready ? "松开放入\n锁定槽" : feedback == null ? String.Empty : feedback + (error ? "\n请重试" : "\n锁定槽");
             fileDropLabel.Foreground = Display.Brush(error ? "#E9B4A8" : "#F0D49A");
             fileDropLabel.Visibility = showing ? Visibility.Visible : Visibility.Collapsed;
+            if (showing)
+            {
+                clickBlinkStarted = -1;
+                DeferIdle(clock.Elapsed.TotalSeconds);
+            }
             BeginAnimation(FileDropMorphProperty, new DoubleAnimation(showing ? 1 : 0, TimeSpan.FromMilliseconds(140))
             {
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
@@ -1045,6 +1061,24 @@ namespace Orbit
         internal void SetGazeForTest(Point offset)
         {
             testGaze = new Vector(offset.X, offset.Y);
+            testPointerOffset = null;
+            UpdateTicker();
+        }
+
+        internal void SetPointerOffsetForTest(Point offset)
+        {
+            testPointerOffset = new Vector(offset.X, offset.Y);
+            UpdateTicker();
+        }
+
+        internal void BlinkOnClick()
+        {
+            if (wantsTimer || timerMix > .01 || fileDropReady || fileDropFeedback != null || !AnimationsEnabled) return;
+            double now = clock.Elapsed.TotalSeconds;
+            DeferIdle(now);
+            blinkStarted = -1;
+            clickBlinkStarted = now;
+            nextBlink = now + 5;
             UpdateTicker();
         }
 
@@ -1056,6 +1090,8 @@ namespace Orbit
                 morphFrom = timerMix;
                 morphStarted = clock.Elapsed.TotalSeconds;
                 wantsTimer = next;
+                clickBlinkStarted = -1;
+                DeferIdle(morphStarted);
             }
             if (!AnimationsEnabled) timerMix = wantsTimer ? 1 : 0;
             UpdateTicker();
@@ -1090,8 +1126,9 @@ namespace Orbit
             }
             if (!wantsTimer)
             {
-                Vector target = TargetGaze();
-                gaze += (target - gaze) * (1 - Math.Exp(-elapsed / .09));
+                Vector target = TargetGaze(now);
+                double response = idleGesture.HasValue ? .036 : .09;
+                gaze += (target - gaze) * (1 - Math.Exp(-elapsed / response));
             }
             orbitAngle = (orbitAngle + elapsed * Math.PI * 2 / OrbitSeconds) % (Math.PI * 2);
             openness = OpenEye(now);
@@ -1099,21 +1136,79 @@ namespace Orbit
             InvalidateVisual();
         }
 
-        private Vector TargetGaze()
+        private Vector TargetGaze(double now)
         {
-            if (app.IsTest) return testGaze;
+            if (app.IsTest)
+                return testPointerOffset.HasValue ? GazeToward(testPointerOffset.Value) : testGaze;
             if (PresentationSource.FromVisual(this) == null) return new Vector();
             Point pointer = PointFromScreen(NativeDesktop.CursorPosition);
             Vector offset = pointer - new Point(44, 44);
+            if (offset.LengthSquared < FollowRadius * FollowRadius)
+            {
+                DeferIdle(now);
+                return GazeToward(offset);
+            }
+            if (app.Launcher.IsVisible || app.Panel.IsVisible || app.Utilities.IsVisible)
+            {
+                DeferIdle(now);
+                return new Vector();
+            }
+            return IdleGaze(now);
+        }
+
+        private static Vector GazeToward(Vector offset)
+        {
             double distance = offset.Length;
-            if (distance < .1 || distance >= 285) return new Vector();
-            double falloff = Math.Min(1, (285 - distance) / 150);
-            return offset * (Math.Min(13.4, distance * .31) * falloff / distance);
+            if (distance < .1 || distance >= FollowRadius) return new Vector();
+            double falloff = Math.Min(1, (FollowRadius - distance) / 55);
+            return offset * (Math.Min(.46, LedFaceRenderer.MaxGazeOffset / distance) * falloff);
+        }
+
+        private void DeferIdle(double now)
+        {
+            idleGesture = null;
+            nextIdle = now + 10;
+        }
+
+        private Vector IdleGaze(double now)
+        {
+            if (idleGesture.HasValue)
+            {
+                double age = now - idleStarted;
+                bool finish = age >= IdleEyeMotion.Duration(idleGesture.Value);
+                if (!finish && now >= idleInputCheck)
+                {
+                    idleInputCheck = now + .24;
+                    finish = !NativeDesktop.InputIdleFor(6000);
+                }
+                if (!finish) return IdleEyeMotion.Sample(idleGesture.Value, age);
+                idleGesture = null;
+                nextIdle = now + 15 + motionRandom.NextDouble() * 11;
+            }
+            if (now < nextIdle) return new Vector();
+            if (!NativeDesktop.InputIdleFor(6000))
+            {
+                nextIdle = now + 2;
+                return new Vector();
+            }
+            idleGesture = IdleEyeMotion.Choose(motionRandom);
+            idleStarted = now;
+            idleInputCheck = now + .24;
+            return new Vector();
         }
 
         private double OpenEye(double now)
         {
-            if (wantsTimer || app.IsTest)
+            if (clickBlinkStarted >= 0)
+            {
+                double clickAge = now - clickBlinkStarted;
+                double secondBlink = ClickBlinkLength + ClickBlinkGap;
+                if (clickAge < ClickBlinkLength) return BlinkOpenness(clickAge, .048, .076, ClickBlinkLength);
+                if (clickAge < secondBlink) return 1;
+                if (clickAge < secondBlink + ClickBlinkLength) return BlinkOpenness(clickAge - secondBlink, .048, .076, ClickBlinkLength);
+                clickBlinkStarted = -1;
+            }
+            if (wantsTimer || app.IsTest || idleGesture.HasValue)
             {
                 blinkStarted = -1;
                 nextBlink = now + 4.5;
@@ -1122,12 +1217,17 @@ namespace Orbit
             if (blinkStarted < 0 && now >= nextBlink) blinkStarted = now;
             if (blinkStarted < 0) return 1;
             double age = now - blinkStarted;
-            if (age < .064) return 1 - age / .064;
-            if (age < .102) return 0;
-            if (age < BlinkSeconds) return 1 - Math.Pow(1 - (age - .102) / (BlinkSeconds - .102), 2);
+            if (age < BlinkSeconds) return BlinkOpenness(age, .064, .102, BlinkSeconds);
             blinkStarted = -1;
-            nextBlink = now + 4.8 + blinkInterval.NextDouble() * 3.8;
+            nextBlink = now + 4.8 + motionRandom.NextDouble() * 3.8;
             return 1;
+        }
+
+        private static double BlinkOpenness(double age, double closedAt, double opensAt, double duration)
+        {
+            if (age < closedAt) return 1 - age / closedAt;
+            if (age < opensAt) return 0;
+            return 1 - Math.Pow(1 - (age - opensAt) / (duration - opensAt), 2);
         }
 
         protected override void OnRender(DrawingContext dc)
