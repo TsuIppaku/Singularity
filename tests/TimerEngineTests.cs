@@ -27,7 +27,11 @@ internal static class TimerEngineTests
         Run("reordering preserves active timers and task identity", ReorderPreservesTasks);
         Run("invalid additions do not mutate state", InvalidAdditions);
         Run("editing and restarting timed tasks", EditingAndRestarting);
-        Console.WriteLine(failures == 0 ? "All 15 timer test groups passed." : failures + " timer test group(s) failed.");
+        Run("manual completion is silent for every unfinished task state", ManualCompletionStates);
+        Run("manual completion preserves other timers and pending alerts", ManualCompletionIsolation);
+        Run("clearing completed tasks preserves active work and daily numbering", ClearCompletedTasks);
+        Run("restoring completed tasks preserves identity and appends pending work", RestoreCompletedTasks);
+        Console.WriteLine(failures == 0 ? "All 19 timer test groups passed." : failures + " timer test group(s) failed.");
         return failures == 0 ? 0 : 1;
     }
 
@@ -146,6 +150,163 @@ internal static class TimerEngineTests
         Assert(task.DueAtUtc == Epoch.AddSeconds(140), "Restarting sets a new deadline from now.");
         Expect<ArgumentException>(() => engine.EditTask(task.Id, "", 100, Epoch.AddSeconds(40)));
         Expect<ArgumentException>(() => engine.EditTask(task.Id, "Still revised", 0, Epoch.AddSeconds(40)));
+    }
+
+    private static void ManualCompletionStates()
+    {
+        foreach (string initial in new[] { "pending", "running", "paused", "checklist" })
+        {
+            TimerEngine engine = new TimerEngine(null);
+            bool checklist = initial == "checklist";
+            OrbitTask task = engine.AddTask(initial, checklist ? 0 : 60, initial == "running" || initial == "paused", Epoch);
+            if (initial == "paused") engine.Pause(Epoch.AddSeconds(5));
+            DateTimeOffset completedAt = Epoch.AddSeconds(20).ToOffset(TimeSpan.FromHours(5.5));
+            engine.MarkCompleted(task.Id, completedAt);
+            Assert(task.Status == OrbitTaskStatus.Completed && task.CompletedAtUtc.HasValue &&
+                task.CompletedAtUtc.Value == completedAt && task.CompletedAtUtc.Value.Offset == TimeSpan.Zero,
+                "Manual completion records a UTC completion time for " + initial + ".");
+            Assert(task.RemainingSeconds == 0 && task.DueAtUtc == null && engine.ActiveTask == null && engine.AlertTask == null,
+                "Manual completion stops the target without creating an alert for " + initial + ".");
+            Assert(task.Name == initial && task.DurationSeconds == (checklist ? 0 : 60) && task.IsChecklist == checklist,
+                "Manual completion retains task identity, original duration and kind.");
+            string snapshot = TaskSnapshot(task);
+            engine.MarkCompleted(task.Id, Epoch.AddHours(1));
+            Assert(TaskSnapshot(task) == snapshot, "Repeated completion must preserve the original completed record.");
+            Assert(!engine.Tick(Epoch.AddHours(2)) && engine.AlertTask == null, "A manually completed task must never ring on a later tick.");
+            TimerEngine restored = RoundTrip(engine);
+            Assert(!restored.State.WasRepaired && restored.AlertTask == null && TaskSnapshot(restored.State.Tasks.Single()) == snapshot,
+                "Manual completion must survive serialization without repair or a new alarm.");
+        }
+
+        TimerEngine overdue = new TimerEngine(null);
+        OrbitTask late = overdue.AddTask("Unticked deadline", 1, true, Epoch);
+        overdue.MarkCompleted(late.Id, Epoch.AddSeconds(5));
+        Assert(overdue.AlertTask == null && late.CompletedAtUtc == Epoch.AddSeconds(5),
+            "A manual checkmark before the next tick remains silent even when the deadline has just passed.");
+    }
+
+    private static void ManualCompletionIsolation()
+    {
+        TimerEngine engine = new TimerEngine(null);
+        OrbitTask paused = engine.AddTask("Paused", 60, true, Epoch);
+        OrbitTask active = engine.AddTask("Active", 120, true, Epoch.AddSeconds(10));
+        OrbitTask pending = engine.AddTask("Pending", 90, false, Epoch);
+        OrbitTask checklist = engine.AddTask("Checklist", 0, false, Epoch);
+        string activeSnapshot = TaskSnapshot(active);
+        foreach (OrbitTask target in new[] { paused, pending, checklist })
+        {
+            engine.MarkCompleted(target.Id, Epoch.AddSeconds(200));
+            Assert(engine.ActiveTask == active && TaskSnapshot(active) == activeSnapshot && engine.AlertTask == null,
+                "Completing another task must not tick, pause, restart or clear the active timer.");
+        }
+        Assert(engine.Tick(Epoch.AddSeconds(200)) && engine.AlertTask == active,
+            "The untouched active timer must still expire through its normal ringing path.");
+        string alertSnapshot = TaskSnapshot(active);
+        OrbitTask next = engine.AddTask("Finish while alarm waits", 30, false, Epoch);
+        engine.MarkCompleted(next.Id, Epoch.AddSeconds(210));
+        engine.MarkCompleted(active.Id, Epoch.AddSeconds(220));
+        Assert(engine.AlertTask == active && TaskSnapshot(active) == alertSnapshot,
+            "Manual completion must preserve an existing reminder and its original completion time.");
+        int count = engine.State.Tasks.Count;
+        Expect<ArgumentException>(() => engine.MarkCompleted("missing", Epoch));
+        Expect<ArgumentException>(() => engine.MarkCompleted(null, Epoch));
+        Assert(engine.State.Tasks.Count == count && engine.AlertTask == active,
+            "An unknown completion target must not mutate tasks or reminders.");
+    }
+
+    private static void ClearCompletedTasks()
+    {
+        TimerEngine engine = new TimerEngine(null);
+        string day = Epoch.ToLocalTime().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        OrbitTask done = engine.AddTask("", 60, false, Epoch);
+        engine.MarkCompleted(done.Id, Epoch.AddSeconds(1));
+        OrbitTask paused = engine.AddTask("Paused work", 60, true, Epoch);
+        OrbitTask active = engine.AddTask("Active work", 120, true, Epoch.AddSeconds(10));
+        OrbitTask pending = engine.AddTask("Pending work", 90, false, Epoch);
+        OrbitTask checklist = engine.AddTask("Checklist", 0, false, Epoch);
+        OrbitTask checkedItem = engine.AddTask("", 0, false, Epoch);
+        engine.MarkCompleted(checkedItem.Id, Epoch.AddSeconds(11));
+        var retained = new[] { paused, active, pending, checklist };
+        var snapshots = retained.Select(TaskSnapshot).ToArray();
+        List<OrbitTask> originalList = engine.State.Tasks;
+        var originalNumbers = engine.State.DailyTaskNumbers;
+        engine.ClearCompleted();
+        Assert(engine.State.Tasks == originalList && engine.State.Tasks.SequenceEqual(retained),
+            "Clearing completion history preserves the task list and unfinished objects in their existing order.");
+        for (int index = 0; index < retained.Length; index++)
+            Assert(TaskSnapshot(retained[index]) == snapshots[index], "Clearing history must preserve every unfinished task field.");
+        Assert(engine.ActiveTask == active && engine.AlertTask == null && engine.State.DailyTaskNumbers == originalNumbers && originalNumbers[day] == 2,
+            "Clearing completion history must preserve active identity and the daily numbering high-water mark.");
+        engine.ClearCompleted();
+        Assert(engine.State.Tasks.SequenceEqual(retained) && TaskSnapshot(active) == snapshots[1], "Clearing an empty completion history must be a no-op.");
+        engine = RoundTrip(engine);
+        Assert(engine.AddTask("", 0, false, Epoch).Name == day + " · 任务 3", "Cleared task numbers must not be reused after relaunch.");
+        Assert(engine.Tick(Epoch.AddSeconds(130)) && engine.AlertTask.Id == active.Id,
+            "The protected running timer keeps its original deadline and still rings normally.");
+        engine.ClearCompleted();
+        Assert(engine.AlertTask == null && engine.State.Tasks.All(task => task.Id != active.Id) && !engine.Tick(Epoch.AddDays(1)),
+            "Deleting alerted completion history must clear its reminder and prevent it from returning.");
+        engine.Start(paused.Id, Epoch.AddSeconds(140));
+        engine.Pause(Epoch.AddSeconds(145));
+        string pausedSnapshot = TaskSnapshot(engine.ActiveTask);
+        engine.ClearCompleted();
+        Assert(engine.ActiveTask.Id == paused.Id && TaskSnapshot(engine.ActiveTask) == pausedSnapshot,
+            "A paused active task must also survive clearing completed history.");
+
+        TimerEngine stale = new TimerEngine(null);
+        OrbitTask staleDone = stale.AddTask("Old completed reference", 10, false, Epoch);
+        stale.MarkCompleted(staleDone.Id, Epoch);
+        stale.State.ActiveTaskId = staleDone.Id;
+        stale.State.AlertTaskId = staleDone.Id;
+        stale.ClearCompleted();
+        Assert(stale.State.Tasks.Count == 0 && stale.State.ActiveTaskId == null && stale.State.AlertTaskId == null,
+            "References to removed completed records must not be left dangling.");
+    }
+
+    private static void RestoreCompletedTasks()
+    {
+        TimerEngine engine = new TimerEngine(null);
+        OrbitTask timed = engine.AddTask("", 60, false, Epoch);
+        OrbitTask checklist = engine.AddTask("", 0, false, Epoch);
+        engine.MarkCompleted(timed.Id, Epoch);
+        engine.ToggleChecklist(checklist.Id, Epoch);
+        string originalName = timed.Name;
+        OrbitTask active = engine.AddTask("Other active work", 120, true, Epoch);
+        OrbitTask pending = engine.AddTask("Other pending work", 30, false, Epoch);
+        string activeSnapshot = TaskSnapshot(active);
+        engine.RestoreCompleted(timed.Id);
+        Assert(engine.State.Tasks.SequenceEqual(new[] { checklist, active, pending, timed }) &&
+            timed.Name == originalName && timed.DurationSeconds == 60 && timed.RemainingSeconds == 60,
+            "Restoring a timer preserves its original object, identity and duration, appending it after current pending work.");
+        Assert(timed.Status == OrbitTaskStatus.Pending && timed.CompletedAtUtc == null && timed.DueAtUtc == null,
+            "A restored timer must be pending with its completion and deadline cleared.");
+        engine.RestoreCompleted(checklist.Id);
+        Assert(engine.State.Tasks.SequenceEqual(new[] { active, pending, timed, checklist }) && checklist.IsChecklist &&
+            checklist.Status == OrbitTaskStatus.Pending && checklist.DurationSeconds == 0 && checklist.RemainingSeconds == 0 &&
+            checklist.CompletedAtUtc == null && checklist.DueAtUtc == null, "A restored checklist remains untimed at the end of pending work.");
+        Assert(engine.ActiveTask == active && TaskSnapshot(active) == activeSnapshot && engine.AlertTask == null,
+            "Restoring either task kind must not start it or modify another active timer.");
+        engine.RestoreCompleted(timed.Id);
+        engine.RestoreCompleted(active.Id);
+        Assert(engine.State.Tasks.SequenceEqual(new[] { active, pending, timed, checklist }) && TaskSnapshot(active) == activeSnapshot,
+            "Restoring an already unfinished task must not reorder it or reset its progress.");
+        Expect<ArgumentException>(() => engine.RestoreCompleted("missing"));
+        TimerEngine restored = RoundTrip(engine);
+        Assert(!restored.State.WasRepaired && restored.State.Tasks.Select(task => task.Id).SequenceEqual(engine.State.Tasks.Select(task => task.Id)),
+            "Restored state and ordering must survive serialization without repair.");
+        string day = Epoch.ToLocalTime().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        Assert(restored.AddTask("", 0, false, Epoch).Name == day + " · 任务 3", "Restoring completed records must not allocate or reuse task numbers.");
+
+        engine.Tick(Epoch.AddSeconds(121));
+        Assert(engine.AlertTask == active, "Fixture timer should complete with a normal alarm.");
+        engine.MarkCompleted(pending.Id, Epoch.AddSeconds(122));
+        engine.RestoreCompleted(pending.Id);
+        Assert(engine.AlertTask == active, "Restoring another completed task must preserve the existing alarm.");
+        engine.State.ActiveTaskId = active.Id;
+        engine.RestoreCompleted(active.Id);
+        Assert(engine.ActiveTask == null && engine.AlertTask == null && active.Status == OrbitTaskStatus.Pending &&
+            active.RemainingSeconds == 120 && active.CompletedAtUtc == null && active.DueAtUtc == null && engine.State.Tasks.Last() == active,
+            "Restoring the alerted task clears only its own alarm and stale active reference, without starting it.");
     }
 
     private static void AlertProtection()

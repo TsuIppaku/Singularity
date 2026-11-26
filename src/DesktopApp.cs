@@ -381,13 +381,13 @@ namespace Orbit
 
         private void OnGlobalMousePressed(Point pointer)
         {
-            if (IsTest || IsExiting || !Launcher.IsVisible) return;
+            if (IsTest || IsExiting || !Launcher.IsVisible || Panel.IsOverTaskMenu(pointer)) return;
             Dot.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(delegate { HideToolsIfOutside(pointer); }));
         }
 
         private void HideToolsIfOutside(Point pointer)
         {
-            if (IsExiting || !Launcher.IsVisible) return;
+            if (IsExiting || !Launcher.IsVisible || Panel.IsOverTaskMenu(pointer)) return;
             if (!PointerIsWithin(Dot, pointer, 0) && !PointerIsWithin(Launcher, pointer, 0) &&
                 !PointerIsWithin(Panel, pointer, 0) && !PointerIsWithin(Utilities, pointer, 0) && !PointerIsWithin(Reminder, pointer, 0))
                 HideTools();

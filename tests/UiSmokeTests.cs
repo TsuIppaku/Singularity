@@ -64,13 +64,16 @@ namespace Orbit
                 app.Panel.TaskNameBox.Text = ""; PressEnter(app.Panel.TaskNameBox); PressEnter(app.Panel.DurationBox);
                 var checklist = app.Engine.State.Tasks.Last();
                 Check(checklist.IsChecklist && checklist.Name.StartsWith(now.ToLocalTime().ToString("yyyy-MM-dd")) && checklist.Name.EndsWith("任务 1"), "Blank fields create a dated, numbered check-only task");
-                var checkControl = ById<CheckBox>(app.Panel, "task-" + checklist.Id + "-check");
-                Check(checkControl != null && ById<Button>(app.Panel, "task-" + checklist.Id + "-play") == null, "Untimed task has a checkbox and no play control");
-                Toggle(checkControl);
-                Check(checklist.Status == OrbitTaskStatus.Completed && app.Engine.AlertTask == null && app.ChimeRequests == 0, "Checking an untimed task completes it without a sound");
+                var completeControl = ById<Button>(app.Panel, "task-" + checklist.Id + "-complete");
+                Check(completeControl != null && ById<Button>(app.Panel, "task-" + checklist.Id + "-play") == null && ById<Button>(app.Panel, "task-" + checklist.Id + "-delete") == null, "Untimed pending task exposes completion without play or permanent-delete buttons");
+                Click(completeControl);
+                Check(checklist.Status == OrbitTaskStatus.Completed && app.Engine.AlertTask == null && app.ChimeRequests == 0, "Completing an untimed task moves it to history without a sound");
                 Click(app.Panel.Find<Button>("CompletedToggle"));
-                Toggle(ById<CheckBox>(app.Panel, "task-" + checklist.Id + "-check"));
-                Check(checklist.Status == OrbitTaskStatus.Pending, "Untimed task can be unchecked again");
+                var checklistDelete = ById<Button>(app.Panel, "task-" + checklist.Id + "-delete");
+                var checklistRestore = ById<Button>(app.Panel, "task-" + checklist.Id + "-restore");
+                Check(checklistDelete != null && checklistRestore != null && ById<Button>(app.Panel, "task-" + checklist.Id + "-complete") == null, "Completed checklist replaces completion with restore and trash buttons");
+                Click(checklistRestore);
+                Check(checklist.Status == OrbitTaskStatus.Pending && ById<Button>(app.Panel, "task-" + checklist.Id + "-complete") != null && ById<Button>(app.Panel, "task-" + checklist.Id + "-delete") == null, "Completed checklist returns to pending through its restore button");
                 app.Panel.TaskNameBox.Text = "喝杯水"; app.Panel.DurationBox.Text = "10s"; PressEnter(app.Panel.DurationBox);
                 var shortTask = app.Engine.State.Tasks.Last();
                 int count = app.Engine.State.Tasks.Count;
@@ -84,8 +87,8 @@ namespace Orbit
                 Check(Object.ReferenceEquals(playControl, ById<Button>(app.Panel, "task-" + timed.Id + "-play")), "Starting a timer preserves its button so the click animation can finish");
                 var editControl = ById<Button>(app.Panel, "task-" + timed.Id + "-edit");
                 var restartControl = ById<Button>(app.Panel, "task-" + timed.Id + "-restart");
-                var deleteControl = ById<Button>(app.Panel, "task-" + timed.Id + "-delete");
-                Check(editControl != null && restartControl != null && deleteControl != null, "Timed task exposes compact edit, restart and red delete actions");
+                var timedCompleteControl = ById<Button>(app.Panel, "task-" + timed.Id + "-complete");
+                Check(editControl != null && restartControl != null && timedCompleteControl != null && ById<Button>(app.Panel, "task-" + timed.Id + "-delete") == null, "Timed pending task exposes edit, restart and completion instead of a trash button");
                 Click(editControl);
                 var editName = ById<TextBox>(app.Panel, "task-" + timed.Id + "-edit-name");
                 var editDuration = ById<TextBox>(app.Panel, "task-" + timed.Id + "-edit-duration");
@@ -148,11 +151,100 @@ namespace Orbit
                 Check(card.Bottom <= bar.Top + 2, "Near the bottom edge the panel flips above the toolbar without overlap");
                 Placement.Move(app.Dot, -20000, -20000); Placement.Clamp(app.Dot); app.RepositionTools(); Pump();
                 Check(Inside(Placement.Bounds(app.Dot), Placement.WorkArea(app.Dot)), "Off-screen dot is recovered safely");
+                CheckTaskCompletionActions(app, now, output);
                 report.AppendLine("PASS: " + checks + " desktop integration checks. System clipboard untouched; audio suppressed.");
                 Environment.ExitCode = 0;
             }
             catch (Exception ex) { report.AppendLine("FAIL: " + ex); Environment.ExitCode = 1; }
             finally { File.WriteAllText(Path.Combine(output, "ui-smoke-results.txt"), report.ToString(), Encoding.UTF8); app.Exit(); }
+        }
+
+        private static void CheckTaskCompletionActions(AppController app, DateTimeOffset now, string output)
+        {
+            // Run destructive task actions after reminder and layout scenarios so
+            // they cannot remove another scenario's task or outstanding alert.
+            var area = Placement.WorkArea(app.Dot);
+            Placement.Move(app.Dot, area.Left + area.Width / 2 - 38, area.Top + 45);
+            app.ShowPanel(); app.RepositionTools(); Pump();
+            var panelBounds = Placement.Rectangle(app.Panel);
+            var barBounds = Placement.Rectangle(app.Launcher);
+            int chimes = app.ChimeRequests;
+            Check(app.Engine.AlertTask == null && !app.Alerting, "Task-action checks begin with previous reminders acknowledged");
+
+            OrbitTask checklist = null, pendingTimer = null, runningTimer = null, pausedTimer = null, removePending = null;
+            app.Act(delegate
+            {
+                checklist = app.Engine.AddTask("完成测试 · 清单", 0, false, now);
+                pendingTimer = app.Engine.AddTask("完成测试 · 尚未启动", 300, false, now);
+                runningTimer = app.Engine.AddTask("完成测试 · 正在计时", 600, false, now);
+                pausedTimer = app.Engine.AddTask("完成测试 · 已暂停", 420, false, now);
+                removePending = app.Engine.AddTask("右键直接删除", 0, false, now);
+            });
+            Click(ById<Button>(app.Panel, "task-" + checklist.Id + "-complete"));
+            Click(ById<Button>(app.Panel, "task-" + pendingTimer.Id + "-complete"));
+            Check(checklist.Status == OrbitTaskStatus.Completed && pendingTimer.Status == OrbitTaskStatus.Completed && pendingTimer.DurationSeconds == 300 && pendingTimer.Name == "完成测试 · 尚未启动", "Checklist and unstarted timer completion preserves task identity, name and original duration");
+
+            Click(ById<Button>(app.Panel, "task-" + runningTimer.Id + "-play"));
+            Check(runningTimer.Status == OrbitTaskStatus.Running, "Manual-completion fixture starts a real running task");
+            Click(ById<Button>(app.Panel, "task-" + runningTimer.Id + "-complete"));
+            Check(runningTimer.Status == OrbitTaskStatus.Completed && runningTimer.DueAtUtc == null && app.Engine.ActiveTask == null, "Completing a running task stops its countdown and clears the active task");
+            Click(ById<Button>(app.Panel, "task-" + pausedTimer.Id + "-play"));
+            Click(ById<Button>(app.Panel, "task-" + pausedTimer.Id + "-play"));
+            Check(pausedTimer.Status == OrbitTaskStatus.Paused, "Manual-completion fixture pauses its timer through the row control");
+            Click(ById<Button>(app.Panel, "task-" + pausedTimer.Id + "-complete"));
+            app.Pulse(); Pump();
+            Check(pausedTimer.Status == OrbitTaskStatus.Completed && app.Engine.ActiveTask == null && app.Engine.AlertTask == null && !app.Alerting && !app.Reminder.IsVisible && app.ChimeRequests == chimes, "Manual completion of pending, running and paused tasks never creates a reminder or chime");
+
+            if (app.Panel.Find<StackPanel>("CompletedList").Visibility != Visibility.Visible)
+                Click(app.Panel.Find<Button>("CompletedToggle"));
+            var checklistTrash = ById<Button>(app.Panel, "task-" + checklist.Id + "-delete");
+            var timedTrash = ById<Button>(app.Panel, "task-" + runningTimer.Id + "-delete");
+            Check(checklistTrash != null && timedTrash != null && ById<Button>(app.Panel, "task-" + checklist.Id + "-complete") == null && ById<Button>(app.Panel, "task-" + runningTimer.Id + "-play") == null, "Expanded completed checklist and timer rows expose trash instead of completion or timer controls");
+            Check(ById<Button>(app.Panel, "task-" + checklist.Id + "-restore") != null && ById<Button>(app.Panel, "task-" + runningTimer.Id + "-restore") != null, "Completed checklist and timer rows both expose a restore arrow");
+            app.Panel.Find<ScrollViewer>("RowsScroll").ScrollToBottom(); Pump();
+            CaptureGroup(app, Path.Combine(output, "11-completed-actions.png"));
+            int beforeDelete = app.Engine.State.Tasks.Count;
+            Click(checklistTrash);
+            Check(app.Engine.State.Tasks.Count == beforeDelete - 1 && !app.Engine.State.Tasks.Any(task => task.Id == checklist.Id) && app.Engine.State.Tasks.Contains(runningTimer), "A completed row's trash button permanently removes only that task");
+            var pendingComplete = ById<Button>(app.Panel, "task-" + removePending.Id + "-complete");
+            Check(pendingComplete != null && ById<Button>(app.Panel, "task-" + removePending.Id + "-delete") == null, "Pending rows reserve their visible action for completion");
+            ClickMenu(TaskMenuItem(pendingComplete, removePending.Id, "删除任务"));
+            Check(!app.Engine.State.Tasks.Any(task => task.Id == removePending.Id) && removePending.Status == OrbitTaskStatus.Pending, "Pending context-menu deletion removes a task directly without marking it completed");
+
+            OrbitTask keepRunning = null, keepPaused = null;
+            app.Act(delegate
+            {
+                keepPaused = app.Engine.AddTask("清除后保留 · 暂停", 720, false, now);
+                keepRunning = app.Engine.AddTask("清除后保留 · 运行", 900, false, now);
+            });
+            Click(ById<Button>(app.Panel, "task-" + keepPaused.Id + "-play"));
+            Click(ById<Button>(app.Panel, "task-" + keepPaused.Id + "-play"));
+            Click(ById<Button>(app.Panel, "task-" + keepRunning.Id + "-play"));
+            DateTimeOffset? activeDeadline = keepRunning.DueAtUtc;
+            Click(ById<Button>(app.Panel, "task-" + runningTimer.Id + "-restore")); Pump();
+            var lastPendingRow = app.Panel.Find<StackPanel>("PendingList").Children.OfType<Grid>().LastOrDefault();
+            Check(runningTimer.Status == OrbitTaskStatus.Pending && runningTimer.RemainingSeconds == runningTimer.DurationSeconds && runningTimer.DurationSeconds == 600 && runningTimer.DueAtUtc == null && runningTimer.CompletedAtUtc == null, "Restoring a completed timer resets its original duration and leaves it waiting to start");
+            Check(app.Engine.State.Tasks.Where(task => task.Status != OrbitTaskStatus.Completed).Last() == runningTimer && lastPendingRow != null && Object.Equals(lastPendingRow.Tag, runningTimer.Id), "Restored timer appears at the end of both the pending model and rendered list");
+            Check(app.Engine.ActiveTask == keepRunning && keepRunning.Status == OrbitTaskStatus.Running && keepRunning.DueAtUtc == activeDeadline && ById<Button>(app.Panel, "task-" + runningTimer.Id + "-play") != null, "Restoring a timer preserves another running countdown and offers play for the restored task");
+            var unfinished = app.Engine.State.Tasks.Where(task => task.Status != OrbitTaskStatus.Completed)
+                .Select(task => new { Task = task, task.Name, task.DurationSeconds, task.RemainingSeconds, task.DueAtUtc, task.Status }).ToArray();
+            var allBeforeClear = app.Engine.State.Tasks.ToArray();
+            var completedIds = allBeforeClear.Where(task => task.Status == OrbitTaskStatus.Completed).Select(task => task.Id).ToArray();
+            Check(completedIds.Length >= 3 && keepRunning.Status == OrbitTaskStatus.Running && keepPaused.Status == OrbitTaskStatus.Paused, "Bulk-clear fixture contains completed tasks alongside pending, paused and running work");
+            Click(app.Panel.Find<Button>("ClearCompleted")); Pump();
+            var prompt = app.Panel.Find<FrameworkElement>("ClearCompletedPrompt");
+            Check(prompt != null && prompt.Visibility == Visibility.Visible && FindText(prompt, "清除") && FindText(prompt, "已完成"), "Clear completed opens an inline confirmation that describes the destructive action");
+            Check(app.Engine.State.Tasks.SequenceEqual(allBeforeClear) && Placement.Rectangle(app.Panel) == panelBounds && Placement.Rectangle(app.Launcher) == barBounds, "Opening confirmation neither deletes tasks nor moves or resizes the tool windows");
+            CaptureGroup(app, Path.Combine(output, "12-clear-completed-confirmation.png"));
+            Click(app.Panel.Find<Button>("ClearCompletedNo")); Pump();
+            Check(prompt.Visibility != Visibility.Visible && app.Engine.State.Tasks.SequenceEqual(allBeforeClear) && completedIds.All(id => app.Engine.State.Tasks.Any(task => task.Id == id && task.Status == OrbitTaskStatus.Completed)), "Cancelling bulk clear closes the confirmation and preserves every completed task");
+            Click(app.Panel.Find<Button>("ClearCompleted"));
+            Click(app.Panel.Find<Button>("ClearCompletedYes")); Pump();
+            Check(prompt.Visibility != Visibility.Visible && !app.Engine.State.Tasks.Any(task => task.Status == OrbitTaskStatus.Completed) && app.Engine.State.Tasks.SequenceEqual(unfinished.Select(item => item.Task)), "Confirming bulk clear removes only completed tasks and preserves unfinished task order");
+            Check(unfinished.All(item => item.Task.Name == item.Name && item.Task.DurationSeconds == item.DurationSeconds && item.Task.RemainingSeconds == item.RemainingSeconds && item.Task.DueAtUtc == item.DueAtUtc && item.Task.Status == item.Status) && app.Engine.ActiveTask == keepRunning, "Bulk clear preserves pending and paused values plus the running timer's deadline and active state");
+            Check(app.ChimeRequests == chimes && app.Engine.AlertTask == null && !app.Alerting && Placement.Rectangle(app.Panel) == panelBounds && Placement.Rectangle(app.Launcher) == barBounds, "Completion and removal remain silent and keep the fixed panel and toolbar in place");
+            var saved = new StateStore(Path.Combine(output, "state")).Load();
+            Check(saved.Tasks.Select(task => task.Id).SequenceEqual(unfinished.Select(item => item.Task.Id)) && saved.ActiveTaskId == keepRunning.Id, "Confirmed bulk removal persists while retaining the active unfinished task");
         }
 
         private static void CheckClipboard(AppController app, DateTimeOffset now, string output)
@@ -366,7 +458,20 @@ namespace Orbit
         private static bool Inside(Placement.NativeRect b, System.Drawing.Rectangle a) { return b.Left >= a.Left && b.Top >= a.Top && b.Right <= a.Right && b.Bottom <= a.Bottom; }
         private static void Check(bool value, string label) { if (!value) throw new InvalidOperationException(label); checks++; report.AppendLine("PASS " + label); }
         private static void Click(Button button) { if (button == null) throw new InvalidOperationException("Expected button was not rendered."); button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); }
-        private static void Toggle(CheckBox box) { if (box == null) throw new InvalidOperationException("Expected checkbox was not rendered."); box.IsChecked = box.IsChecked != true; box.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent)); }
+        private static void ClickMenu(MenuItem item) { if (item == null) throw new InvalidOperationException("Expected task context-menu action was not present."); item.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent)); }
+        private static MenuItem TaskMenuItem(Button button, string taskId, string header)
+        {
+            if (button == null) throw new InvalidOperationException("Expected task row action was not rendered.");
+            DependencyObject node = button;
+            while (node != null)
+            {
+                var row = node as Grid;
+                if (row != null && Object.Equals(row.Tag, taskId))
+                    return row.ContextMenu == null ? null : row.ContextMenu.Items.OfType<MenuItem>().FirstOrDefault(item => Object.Equals(item.Header, header));
+                node = VisualTreeHelper.GetParent(node);
+            }
+            throw new InvalidOperationException("Expected task row was not found for " + taskId);
+        }
         private static void PressEnter(TextBox box) { box.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(box), Environment.TickCount, Key.Return) { RoutedEvent = Keyboard.KeyDownEvent }); }
         private static T ById<T>(DependencyObject node, string id) where T : DependencyObject
         {

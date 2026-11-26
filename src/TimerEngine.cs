@@ -237,6 +237,43 @@ namespace Orbit
             if (State.AlertTaskId == id) State.AlertTaskId = null;
         }
 
+        public void MarkCompleted(string id, DateTimeOffset now)
+        {
+            OrbitTask task = Find(id);
+            if (task == null) throw new ArgumentException("找不到这项任务。", "id");
+            if (task.Status == OrbitTaskStatus.Completed) return;
+            // A manual checkmark affects only this task, without ticking another
+            // timer or replacing an already pending completion reminder.
+            Finish(task, now, false);
+        }
+
+        public void ClearCompleted()
+        {
+            var completedIds = new HashSet<string>(State.Tasks
+                .Where(task => task.Status == OrbitTaskStatus.Completed)
+                .Select(task => task.Id), StringComparer.Ordinal);
+            if (completedIds.Count == 0) return;
+            State.Tasks.RemoveAll(task => task.Status == OrbitTaskStatus.Completed);
+            if (completedIds.Contains(State.ActiveTaskId)) State.ActiveTaskId = null;
+            if (completedIds.Contains(State.AlertTaskId)) State.AlertTaskId = null;
+            // DailyTaskNumbers deliberately survives clearing the visible history.
+        }
+
+        public void RestoreCompleted(string id)
+        {
+            OrbitTask task = Find(id);
+            if (task == null) throw new ArgumentException("找不到这项任务。", "id");
+            if (task.Status != OrbitTaskStatus.Completed) return;
+            task.Status = OrbitTaskStatus.Pending;
+            task.RemainingSeconds = task.IsChecklist ? 0 : task.DurationSeconds;
+            task.CompletedAtUtc = null;
+            task.DueAtUtc = null;
+            if (State.ActiveTaskId == id) State.ActiveTaskId = null;
+            if (State.AlertTaskId == id) State.AlertTaskId = null;
+            State.Tasks.Remove(task);
+            State.Tasks.Add(task);
+        }
+
         public void ToggleChecklist(string id, DateTimeOffset now)
         {
             OrbitTask task = Find(id);
@@ -322,14 +359,14 @@ namespace Orbit
             Finish(current, now.ToUniversalTime());
         }
 
-        private void Finish(OrbitTask task, DateTimeOffset completedAt)
+        private void Finish(OrbitTask task, DateTimeOffset completedAt, bool alert = true)
         {
             task.Status = OrbitTaskStatus.Completed;
             task.RemainingSeconds = 0;
             task.DueAtUtc = null;
             task.CompletedAtUtc = completedAt.ToUniversalTime();
-            State.ActiveTaskId = null;
-            State.AlertTaskId = task.Id;
+            if (State.ActiveTaskId == task.Id) State.ActiveTaskId = null;
+            if (alert) State.AlertTaskId = task.Id;
         }
 
         private void RequireAcknowledgedAlert()

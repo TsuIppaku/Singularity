@@ -21,6 +21,7 @@ namespace Orbit
         private bool showCompleted;
         private bool dragging;
         private bool rebuildAfterDrag;
+        private ContextMenu openRowMenu;
         private string pressedTask;
         private Point dragStart;
 
@@ -52,21 +53,39 @@ namespace Orbit
             Find<Button>("AddButton").Content = new VectorIcon("enter", 17, "#F5F0FC");
             Find<Button>("AcknowledgeButton").Content = new VectorIcon("check", 16, "#BFDBC9");
             Find<ContentControl>("SortHint").Content = new VectorIcon("grip", 14, "#81758E");
+            Find<Button>("ClearCompleted").Content = new VectorIcon("broom", 16, "#B6ABB9");
             Bind("CloseButton", Hide);
             Bind("AddButton", delegate { app.Submit(false); });
             Bind("AcknowledgeButton", app.Acknowledge);
             Bind("CompletedToggle", delegate { showCompleted = !showCompleted; Refresh(true); });
+            Bind("ClearCompleted", ShowClearCompletedPrompt);
+            Bind("ClearCompletedNo", delegate { CloseClearCompletedPrompt(); Find<Button>("ClearCompleted").Focus(); });
+            Bind("ClearCompletedYes", delegate
+            {
+                if (!Find<Grid>("ClearCompletedPrompt").IsVisible) return;
+                CloseClearCompletedPrompt();
+                app.Act(app.Engine.ClearCompleted);
+                FocusName();
+            });
             TaskNameBox.KeyDown += OnInputKey;
             DurationBox.KeyDown += OnInputKey;
             PreviewKeyDown += delegate(object sender, KeyEventArgs e)
             {
-                if (e.Key == Key.Escape) { Hide(); e.Handled = true; }
+                if (e.Key != Key.Escape) return;
+                if (Find<Grid>("ClearCompletedPrompt").IsVisible)
+                {
+                    CloseClearCompletedPrompt();
+                    Find<Button>("ClearCompleted").Focus();
+                }
+                else Hide();
+                e.Handled = true;
             };
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs e)
             {
                 if (!app.IsExiting) { e.Cancel = true; Hide(); }
             };
             SizeChanged += delegate { if (IsVisible) app.RepositionTools(); };
+            IsVisibleChanged += delegate { if (!IsVisible) CloseClearCompletedPrompt(); };
         }
 
         internal T Find<T>(string name) where T : class { return root.FindName(name) as T; }
@@ -81,6 +100,7 @@ namespace Orbit
 
         internal void FocusName()
         {
+            if (Find<Grid>("ClearCompletedPrompt").IsVisible) return;
             FocusManager.SetFocusedElement(this, TaskNameBox);
             if (!app.IsTest && IsVisible) TaskNameBox.Focus();
         }
@@ -133,6 +153,20 @@ namespace Orbit
 
         internal void ClearError() { Find<TextBlock>("ValidationText").Visibility = Visibility.Collapsed; }
 
+        private void ShowClearCompletedPrompt()
+        {
+            if (!Find<Grid>("CompletedHeader").IsVisible) return;
+            Find<Grid>("TaskContent").IsEnabled = false;
+            Find<Grid>("ClearCompletedPrompt").Visibility = Visibility.Visible;
+            Find<Button>("ClearCompletedNo").Focus();
+        }
+
+        private void CloseClearCompletedPrompt()
+        {
+            Find<Grid>("ClearCompletedPrompt").Visibility = Visibility.Collapsed;
+            Find<Grid>("TaskContent").IsEnabled = true;
+        }
+
         internal void Refresh(bool rebuild)
         {
             var alert = app.Engine.AlertTask;
@@ -155,7 +189,7 @@ namespace Orbit
             Find<TextBlock>("PendingHeading").Text = "待办 · " + pending.Count;
             Find<TextBlock>("EmptyPending").Visibility = pending.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             var toggle = Find<Button>("CompletedToggle");
-            toggle.Visibility = completed.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+            Find<Grid>("CompletedHeader").Visibility = completed.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
             var completedLabel = new StackPanel { Orientation = Orientation.Horizontal };
             completedLabel.Children.Add(new VectorIcon(showCompleted ? "chevronUp" : "chevronDown", 13, "#9F96AB") { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 5, 0) });
             completedLabel.Children.Add(new TextBlock { Text = "已完成 · " + completed.Count, FontSize = 11, Foreground = Display.Brush("#9F96AB"), VerticalAlignment = VerticalAlignment.Center });
@@ -187,7 +221,8 @@ namespace Orbit
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(13) });
             grid.ColumnDefinitions.Add(new ColumnDefinition());
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(task.IsChecklist ? 56 : task.Status != OrbitTaskStatus.Completed ? 96 : 32) });
+            bool timedPending = !task.IsChecklist && !row.CompletedGroup;
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(row.CompletedGroup ? 48 : timedPending ? 96 : 24) });
             row.Surface.Child = grid;
 
             var grip = new VectorIcon("grip", 12, "#766A85") { VerticalAlignment = VerticalAlignment.Center, Visibility = draggable ? Visibility.Visible : Visibility.Hidden, Cursor = draggable ? Cursors.SizeAll : Cursors.Arrow, ToolTip = draggable ? "拖动排序" : null };
@@ -199,7 +234,7 @@ namespace Orbit
             row.Labels.Children.Add(row.Name);
             row.Labels.Children.Add(row.Time);
             labelHost.Children.Add(row.Labels);
-            if (!task.IsChecklist && task.Status != OrbitTaskStatus.Completed)
+            if (timedPending)
             {
                 row.Editor = new Grid { Visibility = Visibility.Collapsed };
                 row.Editor.ColumnDefinitions.Add(new ColumnDefinition());
@@ -219,56 +254,38 @@ namespace Orbit
             Grid.SetColumn(labelHost, 1);
             grid.Children.Add(labelHost);
 
-            if (task.IsChecklist)
+            var actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+            Grid.SetColumn(actions, 2);
+            grid.Children.Add(actions);
+            if (timedPending)
             {
-                row.Actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
-                row.Check = new CheckBox { IsChecked = task.Status == OrbitTaskStatus.Completed, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-                System.Windows.Automation.AutomationProperties.SetName(row.Check, "完成 " + task.Name);
-                System.Windows.Automation.AutomationProperties.SetAutomationId(row.Check, "task-" + task.Id + "-check");
-                row.Check.Click += delegate { app.Act(delegate { app.Engine.ToggleChecklist(task.Id, app.Now()); }); };
-                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 17, "#E47B7E"));
-                row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
-                row.Actions.Children.Add(row.Delete);
-                row.Actions.Children.Add(row.Check);
-                Grid.SetColumn(row.Actions, 2);
-                grid.Children.Add(row.Actions);
-                Motion.WireHover(row.Delete);
-                Motion.WirePress(row.Delete);
-                Motion.WireHover(row.Check);
-                Motion.WirePress(row.Check);
-            }
-            else if (task.Status != OrbitTaskStatus.Completed)
-            {
-                row.Actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
                 row.Edit = RowAction("编辑任务", "task-" + task.Id + "-edit", new VectorIcon("edit", 14, "#AAA1B4"));
                 row.Edit.Click += delegate { ToggleEdit(row); };
                 row.Restart = RowAction("重新开始", "task-" + task.Id + "-restart", new VectorIcon("restart", 15, "#AAA1B4"));
                 row.Restart.Click += delegate { app.RestartTask(task.Id); };
+                actions.Children.Add(row.Edit);
+                actions.Children.Add(row.Restart);
+            }
+            if (row.CompletedGroup)
+            {
+                var restore = RowAction("移回待办末尾", "task-" + task.Id + "-restore", new VectorIcon("redo", 16, "#C1B2D0"));
+                restore.Click += delegate { app.Act(delegate { app.Engine.RestoreCompleted(task.Id); }); };
                 row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 17, "#E47B7E"));
                 row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
-                row.Play = RowAction("开始或暂停 " + task.Name, "task-" + task.Id + "-play", null);
-                System.Windows.Automation.AutomationProperties.SetName(row.Play, "开始或暂停 " + task.Name);
-                row.Play.Click += delegate { app.StartTask(task.Id); };
-                row.Actions.Children.Add(row.Edit);
-                row.Actions.Children.Add(row.Restart);
-                row.Actions.Children.Add(row.Delete);
-                row.Actions.Children.Add(row.Play);
-                Grid.SetColumn(row.Actions, 2);
-                grid.Children.Add(row.Actions);
-                Motion.WireHover(row.Edit); Motion.WirePress(row.Edit);
-                Motion.WireHover(row.Restart); Motion.WirePress(row.Restart);
-                Motion.WireHover(row.Delete); Motion.WirePress(row.Delete);
-                Motion.WireHover(row.Play);
-                Motion.WirePress(row.Play);
+                actions.Children.Add(restore);
+                actions.Children.Add(row.Delete);
             }
             else
             {
-                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 17, "#E47B7E"));
-                row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
-                Grid.SetColumn(row.Delete, 2);
-                grid.Children.Add(row.Delete);
-                Motion.WireHover(row.Delete);
-                Motion.WirePress(row.Delete);
+                var complete = RowAction("标记完成", "task-" + task.Id + "-complete", new VectorIcon("check", 16, "#A7CDC0"));
+                complete.Click += delegate { app.Act(delegate { app.Engine.MarkCompleted(task.Id, app.Now()); }); };
+                actions.Children.Add(complete);
+            }
+            if (timedPending)
+            {
+                row.Play = RowAction("开始或暂停 " + task.Name, "task-" + task.Id + "-play", null);
+                row.Play.Click += delegate { app.StartTask(task.Id); };
+                actions.Children.Add(row.Play);
             }
 
             row.Before = new Border { Height = 2, Background = Display.Brush("#B79ADB"), VerticalAlignment = VerticalAlignment.Top, CornerRadius = new CornerRadius(1), Visibility = Visibility.Collapsed, IsHitTestVisible = false };
@@ -287,16 +304,36 @@ namespace Orbit
         private ContextMenu RowMenu(OrbitTask task)
         {
             var menu = new ContextMenu();
-            if (!task.IsChecklist && task.Id == app.Engine.State.ActiveTaskId)
+            menu.Opened += delegate { openRowMenu = menu; };
+            menu.Closed += delegate { if (openRowMenu == menu) openRowMenu = null; };
+            if (task.Status == OrbitTaskStatus.Completed)
+            {
+                var restore = new MenuItem { Header = "移回待办" };
+                restore.Click += delegate { app.Act(delegate { app.Engine.RestoreCompleted(task.Id); }); };
+                menu.Items.Add(restore);
+            }
+            else if (!task.IsChecklist)
             {
                 var finish = new MenuItem { Header = "提前完成" };
-                finish.Click += delegate { app.Act(delegate { app.Engine.Complete(app.Now()); }); };
+                menu.Opened += delegate { finish.Visibility = task.Id == app.Engine.State.ActiveTaskId ? Visibility.Visible : Visibility.Collapsed; };
+                finish.Click += delegate
+                {
+                    if (task.Id == app.Engine.State.ActiveTaskId) app.Act(delegate { app.Engine.Complete(app.Now()); });
+                };
                 menu.Items.Add(finish);
             }
             var remove = new MenuItem { Header = "删除任务" };
             remove.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
             menu.Items.Add(remove);
             return menu;
+        }
+
+        internal bool IsOverTaskMenu(Point screenPoint)
+        {
+            var menu = openRowMenu;
+            if (!IsVisible || menu == null || !menu.IsOpen || PresentationSource.FromVisual(menu) == null) return false;
+            Point local = menu.PointFromScreen(screenPoint);
+            return new Rect(0, 0, menu.ActualWidth, menu.ActualHeight).Contains(local);
         }
 
         private static Button RowAction(string tooltip, string automationId, object content)
@@ -310,6 +347,8 @@ namespace Orbit
             };
             System.Windows.Automation.AutomationProperties.SetName(button, tooltip);
             System.Windows.Automation.AutomationProperties.SetAutomationId(button, automationId);
+            Motion.WireHover(button);
+            Motion.WirePress(button);
             return button;
         }
 
@@ -369,11 +408,6 @@ namespace Orbit
             if (row.Task.IsChecklist)
             {
                 row.Time.Text = completed ? "已完成" : "勾选完成";
-                if (row.Check != null)
-                {
-                    row.Check.IsChecked = completed;
-                    row.Check.ToolTip = completed ? "取消完成" : "标记完成";
-                }
             }
             else
             {
@@ -483,13 +517,12 @@ namespace Orbit
             internal OrbitTask Task;
             internal Grid Outer, Editor;
             internal Border Surface, Before, After;
-            internal StackPanel Labels, Actions;
+            internal StackPanel Labels;
             internal TextBlock Name, Time;
             internal TextBox EditName, EditDuration;
             internal Button Play, Edit, Restart, Delete;
             internal VectorIcon PlayIcon;
             internal string PlayIconKind, EditIconKind;
-            internal CheckBox Check;
             internal bool Hovered, CompletedGroup, Editing;
         }
     }
