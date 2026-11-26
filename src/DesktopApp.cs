@@ -95,8 +95,8 @@ namespace Orbit
         private readonly DispatcherTimer ticker;
         private readonly DispatcherTimer chimeTimer;
         private readonly DispatcherTimer savePositionTimer;
-        private readonly DispatcherTimer previewDismissTimer;
-        private GlobalMouseClickMonitor mouseMonitor;
+        private readonly DispatcherTimer toolHoverTimer;
+        private readonly Stopwatch toolHoverClock = Stopwatch.StartNew();
         private Forms.NotifyIcon tray;
         private Drawing.Icon trayIcon;
         private EventWaitHandle showSignal;
@@ -106,9 +106,9 @@ namespace Orbit
         private bool positioning;
         private bool placementDirty;
         private bool switchingTools;
-        private bool launcherPreview;
-        private bool toolsPinned;
         private bool previewHiding;
+        private bool keepUnsavedNotes;
+        private double outsideToolsSince = -1;
         private int previewFadeGeneration;
         private DispatcherOperation pendingPlacement;
         private PopupSide? panelSide;
@@ -138,17 +138,15 @@ namespace Orbit
             chimeTimer.Tick += delegate { if (Engine.AlertTask != null) Chime(); };
             savePositionTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
             savePositionTimer.Tick += delegate { savePositionTimer.Stop(); SavePosition(); };
-            previewDismissTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(280) };
-            previewDismissTimer.Tick += delegate { previewDismissTimer.Stop(); DismissPreviewIfAway(IsPointerInPreviewRegion()); };
+            toolHoverTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(50) };
+            toolHoverTimer.Tick += delegate { UpdateToolHover(); };
             Dot.MouseEnter += delegate
             {
                 if (Mouse.LeftButton != MouseButtonState.Pressed) PreviewLauncher();
             };
-            Dot.MouseLeave += delegate { SchedulePreviewDismissal(); };
             Launcher.MouseEnter += delegate { KeepPreviewOpen(); };
-            Launcher.MouseLeave += delegate { SchedulePreviewDismissal(); };
-            Panel.Deactivated += delegate { RequestOutsideDismissal(); };
-            Utilities.Deactivated += delegate { RequestOutsideDismissal(); };
+            Panel.MouseEnter += delegate { KeepPreviewOpen(); };
+            Utilities.MouseEnter += delegate { KeepPreviewOpen(); };
         }
 
         internal void Start()
@@ -167,15 +165,6 @@ namespace Orbit
                 clipboardMonitor.Start();
                 ticker.Start();
                 CreateTray();
-                string mouseError;
-                mouseMonitor = new GlobalMouseClickMonitor();
-                mouseMonitor.Pressed += OnGlobalMousePressed;
-                if (!mouseMonitor.TryStart(out mouseError))
-                {
-                    mouseMonitor.Dispose();
-                    mouseMonitor = null;
-                    Panel.ShowError("无法监听窗口外点击：" + mouseError);
-                }
                 showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, "Local\\Singularity.Orbit.Show");
                 signalRegistration = ThreadPool.RegisterWaitForSingleObject(showSignal, delegate { Dot.Dispatcher.BeginInvoke(new Action(ShowPanel)); }, null, Timeout.Infinite, false);
             }
@@ -301,66 +290,73 @@ namespace Orbit
 
         internal void ClickDot()
         {
-            if (Engine.AlertTask != null) { Acknowledge(); return; }
-            if (!Launcher.IsVisible) { ShowLauncher(); return; }
-            // A hover reveal becomes intentional only when it is clicked. The
-            // first click pins it; later clicks use the familiar collapse action.
-            if (launcherPreview && !Panel.IsVisible && !Utilities.IsVisible) { PinTools(); return; }
-            HideTools();
+            if (Engine.AlertTask != null) Acknowledge();
         }
 
         internal void ShowPanel()
         {
             ShowTool("timer", false);
+            // A tray launch starts with the pointer away from the orb. Give the
+            // user a moment to reach the panel before ordinary hover rules apply.
+            if (Panel.IsVisible) outsideToolsSince = toolHoverClock.Elapsed.TotalMilliseconds + 1200;
         }
 
         internal void ShowLauncher()
         {
             if (IsExiting) return;
-            PinTools();
+            KeepPreviewOpen();
             if (Launcher.IsVisible) { RepositionTools(); return; }
             PresentTool(Launcher, null);
+            if (!IsTest) toolHoverTimer.Start();
         }
 
         internal void PreviewLauncher()
         {
-            if (IsExiting || Dot.IsReceivingFileDrop || Panel.IsVisible || Utilities.IsVisible) return;
+            if (IsExiting || Dot.IsReceivingFileDrop) return;
             if (Launcher.IsVisible) { KeepPreviewOpen(); return; }
-            toolsPinned = false;
-            launcherPreview = true;
-            previewDismissTimer.Stop();
-            PresentTool(Launcher, null);
-        }
-
-        private void PinTools()
-        {
-            launcherPreview = false;
-            toolsPinned = true;
-            previewDismissTimer.Stop();
-            CancelPreviewFade();
+            ShowLauncher();
         }
 
         private void KeepPreviewOpen()
         {
-            if (!launcherPreview) return;
-            previewDismissTimer.Stop();
+            outsideToolsSince = -1;
             CancelPreviewFade();
         }
 
-        private void SchedulePreviewDismissal()
+        private void UpdateToolHover()
         {
-            if (!launcherPreview || toolsPinned || Panel.IsVisible || Utilities.IsVisible) return;
-            previewDismissTimer.Stop();
-            previewDismissTimer.Start();
+            if (IsExiting || !Launcher.IsVisible) { toolHoverTimer.Stop(); return; }
+            if (ToolInteractionInProgress)
+            {
+                KeepPreviewOpen();
+                return;
+            }
+            if (IsPointerInToolRegion(NativeDesktop.CursorPosition))
+            {
+                keepUnsavedNotes = false;
+                KeepPreviewOpen();
+                return;
+            }
+            if (keepUnsavedNotes) return;
+            double now = toolHoverClock.Elapsed.TotalMilliseconds;
+            if (outsideToolsSince < 0) outsideToolsSince = now;
+            else if (now - outsideToolsSince >= 280) BeginPreviewFade();
         }
 
-        private bool IsPointerInPreviewRegion()
+        private bool IsPointerInToolRegion(Point pointer)
         {
-            if (!Dot.IsVisible || !Launcher.IsVisible) return false;
-            Point pointer = NativeDesktop.CursorPosition;
-            // Keep two compact halos rather than a large rectangular bridge.
+            // Each visible surface has its own compact tolerance area.
             return PointerIsWithin(Dot, pointer, PreviewGracePixels) ||
-                PointerIsWithin(Launcher, pointer, PreviewGracePixels);
+                PointerIsWithin(Launcher, pointer, PreviewGracePixels) ||
+                PointerIsWithin(Panel, pointer, PreviewGracePixels) ||
+                PointerIsWithin(Utilities, pointer, PreviewGracePixels) ||
+                Panel.IsOverTaskMenu(pointer) ||
+                Placement.PointerIsOverMenu(Dot.ContextMenu, pointer);
+        }
+
+        private bool ToolInteractionInProgress
+        {
+            get { return switchingTools || Dot.IsReceivingFileDrop || Panel.IsReordering || Utilities.ClipboardGestureDragging; }
         }
 
         private static bool PointerIsWithin(Window window, Point pointer, int padding)
@@ -371,79 +367,61 @@ namespace Orbit
                 pointer.Y >= bounds.Top - padding && pointer.Y < bounds.Bottom + padding;
         }
 
-        private void DismissPreviewIfAway(bool pointerInPreviewRegion)
-        {
-            if (launcherPreview && !toolsPinned && !Panel.IsVisible && !Utilities.IsVisible && !pointerInPreviewRegion) BeginPreviewFade();
-        }
-
         private void BeginPreviewFade()
         {
             if (previewHiding || !Launcher.IsVisible) return;
+            if (!Utilities.Flush()) { ShowUnsavedNotes(); return; }
             previewHiding = true;
             int generation = ++previewFadeGeneration;
-            var fade = new DoubleAnimation(Launcher.Opacity, 0, TimeSpan.FromMilliseconds(125))
+            FadeTool(Panel, generation);
+            FadeTool(Utilities, generation);
+            FadeTool(Launcher, generation);
+        }
+
+        private void FadeTool(Window window, int generation)
+        {
+            if (!window.IsVisible) return;
+            var fade = new DoubleAnimation(window.Opacity, 0, TimeSpan.FromMilliseconds(125))
             {
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
             };
-            fade.Completed += delegate
+            if (window == Launcher) fade.Completed += delegate
             {
                 if (previewFadeGeneration != generation || !previewHiding) return;
-                previewHiding = false;
-                if (launcherPreview && !toolsPinned && !IsPointerInPreviewRegion()) HideTools();
+                if (ToolInteractionInProgress || IsPointerInToolRegion(NativeDesktop.CursorPosition))
+                    KeepPreviewOpen();
+                else HideTools();
             };
-            Launcher.BeginAnimation(UIElement.OpacityProperty, fade, HandoffBehavior.SnapshotAndReplace);
+            window.BeginAnimation(UIElement.OpacityProperty, fade, HandoffBehavior.SnapshotAndReplace);
         }
 
         private void CancelPreviewFade()
         {
+            if (!previewHiding) return;
             previewHiding = false;
             previewFadeGeneration++;
-            if (!Launcher.IsVisible) return;
-            Launcher.BeginAnimation(UIElement.OpacityProperty, null);
-            Launcher.Opacity = 1;
+            RestoreToolOpacity(Launcher);
+            RestoreToolOpacity(Panel);
+            RestoreToolOpacity(Utilities);
         }
 
-        private void RequestOutsideDismissal()
+        private static void RestoreToolOpacity(Window window)
         {
-            if (IsTest || IsExiting || !toolsPinned || switchingTools) return;
-            Dot.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(delegate
-            {
-                if (IsExiting || !toolsPinned || switchingTools || !Launcher.IsVisible) return;
-                Point pointer = NativeDesktop.CursorPosition;
-                HideToolsIfOutside(pointer);
-            }));
+            window.BeginAnimation(UIElement.OpacityProperty, null);
+            window.Opacity = 1;
         }
 
-        private void OnGlobalMousePressed(Point pointer)
+        internal void DismissPreviewForTest(Point pointer)
         {
-            if (IsTest || IsExiting || !Launcher.IsVisible || Panel.IsOverTaskMenu(pointer)) return;
-            Dot.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(delegate { HideToolsIfOutside(pointer); }));
+            if (IsTest && Launcher.IsVisible && !IsPointerInToolRegion(pointer)) HideTools();
         }
-
-        private void HideToolsIfOutside(Point pointer)
-        {
-            if (IsExiting || !Launcher.IsVisible || Panel.IsOverTaskMenu(pointer)) return;
-            if (!PointerIsWithin(Dot, pointer, 0) && !PointerIsWithin(Launcher, pointer, 0) &&
-                !PointerIsWithin(Panel, pointer, 0) && !PointerIsWithin(Utilities, pointer, 0) && !PointerIsWithin(Reminder, pointer, 0))
-                HideTools();
-        }
-
-        // Keeps the interaction state directly testable without reading the real cursor.
-        internal void DismissPreviewForTest(bool pointerInPreviewRegion)
-        {
-            if (launcherPreview && !toolsPinned && !pointerInPreviewRegion) HideTools();
-        }
-        internal void ClickOutsideForTest(Point pointer) { HideToolsIfOutside(pointer); }
-        internal bool LauncherIsPreview { get { return launcherPreview; } }
-        internal bool ToolsArePinned { get { return toolsPinned; } }
 
         internal void HideTools()
         {
             if (!Utilities.Flush()) { ShowUnsavedNotes(); return; }
-            previewDismissTimer.Stop();
-            launcherPreview = false;
-            toolsPinned = false;
-            CancelPreviewFade();
+            toolHoverTimer.Stop();
+            keepUnsavedNotes = false;
+            KeepPreviewOpen();
             Panel.Hide(); Utilities.Hide(); Launcher.Hide();
             panelSide = null; lastPanelAnchor = null;
         }
@@ -452,7 +430,7 @@ namespace Orbit
         {
             if (IsExiting) return;
             if (!Utilities.Flush()) { ShowUnsavedNotes(); return; }
-            PinTools();
+            KeepPreviewOpen();
             bool alreadyOpen = (mode == "timer" && Panel.IsVisible) || (Utilities.IsVisible && Utilities.Mode == mode);
             if (alreadyOpen)
             {
@@ -509,6 +487,7 @@ namespace Orbit
                 {
                     if (IsExiting || !target.IsVisible || showVersions[target] != version) return;
                     if (mode != null && Launcher.Selected != mode) return;
+                    if (previewHiding) return;
                     PlaceToolsNow();
                     target.Opacity = 1;
                     if (mode != null) FocusTool(mode);
@@ -606,6 +585,13 @@ namespace Orbit
 
         private void ShowUnsavedNotes()
         {
+            keepUnsavedNotes = true;
+            KeepPreviewOpen();
+            if (Utilities.IsVisible && Utilities.Mode == "notes")
+            {
+                FocusTool("notes");
+                return;
+            }
             if (!Launcher.IsVisible) ShowLauncher();
             switchingTools = true;
             try
@@ -822,9 +808,8 @@ namespace Orbit
             if (IsExiting) return;
             if (!Utilities.Flush()) { ShowUnsavedNotes(); return; }
             IsExiting = true;
-            ticker.Stop(); chimeTimer.Stop(); savePositionTimer.Stop();
+            ticker.Stop(); chimeTimer.Stop(); savePositionTimer.Stop(); toolHoverTimer.Stop();
             if (clipboardMonitor != null) clipboardMonitor.Dispose();
-            if (mouseMonitor != null) { mouseMonitor.Dispose(); mouseMonitor = null; }
             Engine.Tick(Now()); SavePosition();
             Utilities.Flush();
             sound.Dispose();
@@ -865,7 +850,7 @@ namespace Orbit
             visual = new DotVisual(app) { AllowDrop = true }; Content = visual; Cursor = Cursors.Hand;
             AllowDrop = true;
             Motion.WireHover(visual); Motion.WirePress(visual);
-            tip = new ToolTip { Content = "Orbit · 点击开始，拖动移动，右键菜单" }; ToolTip = tip;
+            tip = new ToolTip { Content = "Orbit · 悬停打开工具，拖动移动，右键菜单" }; ToolTip = tip;
             ToolTipService.SetInitialShowDelay(this, 450);
             fileDropFeedbackTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
             fileDropFeedbackTimer.Tick += delegate { fileDropFeedbackTimer.Stop(); visual.SetFileDropState(false, null, false); };
@@ -878,11 +863,17 @@ namespace Orbit
                 if (e.Key == Key.Escape && IsReceivingFileDrop) { CancelFileDropPreview(); e.Handled = true; }
             };
             IsVisibleChanged += delegate { if (!IsVisible) CancelFileDropPreview(); };
-            SourceInitialized += delegate { NativeDesktop.PreventActivation(this); };
+            SourceInitialized += delegate { NativeDesktop.PreventActivation(this); UpdateFollowRange(); };
             MouseLeftButtonDown += OnDown; MouseMove += OnMove; MouseLeftButtonUp += OnUp;
             LostMouseCapture += delegate { pressed = false; };
             MouseRightButtonUp += delegate(object sender, MouseButtonEventArgs e) { ContextMenu = app.DotMenu(); ContextMenu.IsOpen = true; e.Handled = true; };
-            LocationChanged += delegate { if (IsLoaded) app.Moved(); };
+            LocationChanged += delegate
+            {
+                if (!IsLoaded) return;
+                UpdateFollowRange();
+                app.Moved();
+            };
+            DpiChanged += delegate(object sender, DpiChangedEventArgs e) { UpdateFollowRange(e.NewDpi.DpiScaleX); };
             Closing += delegate(object sender, System.ComponentModel.CancelEventArgs e) { if (!app.IsExiting) { e.Cancel = true; Dispatcher.BeginInvoke(new Action(app.Exit)); } };
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
             Closed += delegate { CancelFileDropPreview(); Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplayChanged; };
@@ -938,7 +929,19 @@ namespace Orbit
 
         private void OnDisplayChanged(object sender, EventArgs args)
         {
-            Dispatcher.BeginInvoke(new Action(delegate { if (!app.IsExiting) { Placement.Clamp(this); app.Moved(); } }));
+            Dispatcher.BeginInvoke(new Action(delegate
+            {
+                if (app.IsExiting) return;
+                Placement.Clamp(this);
+                UpdateFollowRange();
+                app.Moved();
+            }));
+        }
+
+        private void UpdateFollowRange(double? dpiScale = null)
+        {
+            double scale = dpiScale ?? VisualTreeHelper.GetDpi(this).DpiScaleX;
+            visual.SetMonitorWidth(Placement.Monitor(this).Bounds.Width / scale);
         }
 
         private void OnDown(object sender, MouseButtonEventArgs e)
@@ -973,7 +976,7 @@ namespace Orbit
             visual.Refresh();
             var task = app.Engine.ActiveTask;
             var alert = app.Engine.AlertTask;
-            tip.Content = alert != null ? "时间到了 · " + alert.Name + "\n点击小点停止提醒" : task != null ? task.Name + "\n" + (task.Status == OrbitTaskStatus.Paused ? "已暂停 · " : "剩余 ") + Display.Time(task.RemainingSeconds) : "Orbit · 点击打开工具\n拖动移动 · 右键菜单";
+            tip.Content = alert != null ? "时间到了 · " + alert.Name + "\n点击小点停止提醒" : task != null ? task.Name + "\n" + (task.Status == OrbitTaskStatus.Paused ? "已暂停 · " : "剩余 ") + Display.Time(task.RemainingSeconds) : "Orbit · 悬停打开工具\n拖动移动 · 右键菜单";
         }
     }
 
@@ -982,7 +985,6 @@ namespace Orbit
         private const double TimerMorphSeconds = .64;
         private const double OrbitSeconds = 17;
         private const double BlinkSeconds = .235;
-        private const double FollowRadius = 175;
         private const double ClickBlinkLength = .145;
         private const double ClickBlinkGap = .055;
         private static readonly DependencyProperty FileDropMorphProperty = DependencyProperty.Register(
@@ -996,6 +998,8 @@ namespace Orbit
         private readonly Random motionRandom = new Random();
         private Vector gaze, testGaze;
         private Vector? testPointerOffset;
+        private double fullFollowRadius = 175;
+        private double FollowLimit { get { return fullFollowRadius * 1.2; } }
         private double orbitAngle = -.85;
         private double openness = 1;
         private double nextBlink = 5;
@@ -1071,6 +1075,11 @@ namespace Orbit
             UpdateTicker();
         }
 
+        internal void SetMonitorWidth(double width)
+        {
+            if (width > 0) fullFollowRadius = width / 4;
+        }
+
         internal void BlinkOnClick()
         {
             if (wantsTimer || timerMix > .01 || fileDropReady || fileDropFeedback != null || !AnimationsEnabled) return;
@@ -1143,7 +1152,8 @@ namespace Orbit
             if (PresentationSource.FromVisual(this) == null) return new Vector();
             Point pointer = PointFromScreen(NativeDesktop.CursorPosition);
             Vector offset = pointer - new Point(44, 44);
-            if (offset.LengthSquared < FollowRadius * FollowRadius)
+            double limit = FollowLimit;
+            if (offset.LengthSquared < limit * limit)
             {
                 DeferIdle(now);
                 return GazeToward(offset);
@@ -1156,11 +1166,13 @@ namespace Orbit
             return IdleGaze(now);
         }
 
-        private static Vector GazeToward(Vector offset)
+        private Vector GazeToward(Vector offset)
         {
             double distance = offset.Length;
-            if (distance < .1 || distance >= FollowRadius) return new Vector();
-            double falloff = Math.Min(1, (FollowRadius - distance) / 55);
+            double limit = FollowLimit;
+            if (distance < .1 || distance >= limit) return new Vector();
+            double edge = Math.Min(1, (limit - distance) / (limit - fullFollowRadius));
+            double falloff = edge * edge * (3 - 2 * edge);
             return offset * (Math.Min(.46, LedFaceRenderer.MaxGazeOffset / distance) * falloff);
         }
 
@@ -1311,8 +1323,15 @@ namespace Orbit
         [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll")] internal static extern bool DestroyIcon(IntPtr handle);
         internal static NativeRect Bounds(Window window) { NativeRect result; GetWindowRect(new WindowInteropHelper(window).Handle, out result); return result; }
-        internal static Drawing.Rectangle WorkArea(Window window) { var b = Bounds(window); return Forms.Screen.FromRectangle(new Drawing.Rectangle(b.Left, b.Top, b.Width, b.Height)).WorkingArea; }
+        internal static Forms.Screen Monitor(Window window) { return Forms.Screen.FromRectangle(Rectangle(window)); }
+        internal static Drawing.Rectangle WorkArea(Window window) { return Monitor(window).WorkingArea; }
         internal static Drawing.Rectangle Rectangle(Window window) { var r = Bounds(window); return new Drawing.Rectangle(r.Left, r.Top, r.Width, r.Height); }
+        internal static bool PointerIsOverMenu(ContextMenu menu, Point screenPoint)
+        {
+            if (menu == null || !menu.IsOpen || PresentationSource.FromVisual(menu) == null) return false;
+            Point local = menu.PointFromScreen(screenPoint);
+            return new Rect(0, 0, menu.ActualWidth, menu.ActualHeight).Contains(local);
+        }
         internal static void Move(Window window, int left, int top)
         {
             IntPtr handle = new WindowInteropHelper(window).Handle;

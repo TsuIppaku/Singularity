@@ -27,6 +27,7 @@ namespace Orbit
 
         internal TextBox TaskNameBox { get { return Find<TextBox>("TaskNameBox"); } }
         internal TextBox DurationBox { get { return Find<TextBox>("DurationBox"); } }
+        internal bool IsReordering { get { return dragging; } }
 
         internal TaskPanel(AppController app)
         {
@@ -330,10 +331,7 @@ namespace Orbit
 
         internal bool IsOverTaskMenu(Point screenPoint)
         {
-            var menu = openRowMenu;
-            if (!IsVisible || menu == null || !menu.IsOpen || PresentationSource.FromVisual(menu) == null) return false;
-            Point local = menu.PointFromScreen(screenPoint);
-            return new Rect(0, 0, menu.ActualWidth, menu.ActualHeight).Contains(local);
+            return IsVisible && Placement.PointerIsOverMenu(openRowMenu, screenPoint);
         }
 
         private static Button RowAction(string tooltip, string automationId, object content)

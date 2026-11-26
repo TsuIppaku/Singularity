@@ -28,23 +28,28 @@ namespace Orbit
                 var working = Placement.WorkArea(app.Dot);
                 Placement.Move(app.Dot, working.Left + working.Width / 2 - 38, working.Top + 45);
                 Check(app.Dot.IsVisible && app.Dot.Topmost && !app.Dot.ShowInTaskbar, "Native dot remains an independent topmost window");
-                app.Dot.SetPointerOffsetForTest(new Point(-93, 0));
-                CheckLedOrb(app, output, "00-led-idle-near-left.png", true, 28);
-                app.Dot.SetPointerOffsetForTest(new Point(-2800, 0));
+                double monitorWidthDip = Placement.Monitor(app.Dot).Bounds.Width / VisualTreeHelper.GetDpi(app.Dot).DpiScaleX;
+                report.AppendLine("LED owning monitor width: " + monitorWidthDip.ToString("0.00") + " DIP");
+                app.Dot.SetPointerOffsetForTest(new Point(-monitorWidthDip * .25, 0));
+                CheckLedOrb(app, output, "00-led-idle-quarter-screen-left.png", true, 28);
+                app.Dot.SetPointerOffsetForTest(new Point(-monitorWidthDip * .35, 0));
                 CheckLedOrb(app, output, "00-led-idle-distant-centered.png", true, 48, 40);
                 app.Dot.SetGazeForTest(new Point(10, -8));
                 CheckLedOrb(app, output, "00-led-idle-right-up.png", true);
+                app.HideTools(); app.ClickDot(); Pump();
+                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking the idle orb does not open tools");
                 app.PreviewLauncher(); Pump();
-                Check(app.Launcher.IsVisible && app.LauncherIsPreview && !app.ToolsArePinned && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Hover preview reveals only the three-tool launcher");
-                app.DismissPreviewForTest(false); Pump();
-                Check(!app.Launcher.IsVisible && !app.LauncherIsPreview, "Leaving the expanded hover region collapses the preview");
-                app.PreviewLauncher(); app.ClickDot(); app.DismissPreviewForTest(false); Pump();
-                Check(app.Launcher.IsVisible && app.ToolsArePinned && !app.LauncherIsPreview, "Clicking a hover preview pins it instead of allowing automatic dismissal");
-                app.ClickOutsideForTest(new Point(working.Left, working.Bottom)); Pump();
-                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "An outside click closes a pinned toolbar even when no child panel is open");
-                app.HideTools();
+                Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Hovering the orb reveals only the three-tool launcher");
+                var hoverDot = Placement.Bounds(app.Dot); var hoverBar = Placement.Bounds(app.Launcher);
+                app.DismissPreviewForTest(WindowCenter(app.Dot)); Pump();
+                app.DismissPreviewForTest(new Point((hoverDot.Left + hoverDot.Right) / 2.0, (hoverDot.Bottom + hoverBar.Top) / 2.0)); Pump();
+                app.DismissPreviewForTest(WindowCenter(app.Launcher)); Pump();
+                Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Pointer transit from the orb into the toolbar stays within the shared hover region");
                 app.ClickDot(); Pump();
-                Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking dot reveals only the three-tool launcher");
+                Check(app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Clicking an expanded orb neither closes the toolbar nor opens a child");
+                app.DismissPreviewForTest(OutsideToolsPoint(app)); Pump();
+                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Leaving the hover region closes the toolbar even after the orb was clicked");
+                app.PreviewLauncher(); Pump();
                 Check(app.Launcher.ToolButton("timer").ToolTip != null && app.Launcher.ToolButton("notes").ToolTip != null && app.Launcher.ToolButton("clipboard").ToolTip != null, "All three tools expose hover descriptions");
                 var launcherOnly = Placement.Rectangle(app.Launcher);
                 CaptureGroup(app, Path.Combine(output, "01-launcher.png"));
@@ -57,6 +62,7 @@ namespace Orbit
                 var firstBar = Placement.Bounds(app.Launcher); var firstCard = Placement.Bounds(app.Panel);
                 Check(Math.Abs((firstBar.Left + firstBar.Right) - (firstCard.Left + firstCard.Right)) <= 2 && firstCard.Top >= firstBar.Bottom - 2, "Timer panel opens directly below and centered on the toolbar");
                 Check(FocusManager.GetFocusedElement(app.Panel) == app.Panel.TaskNameBox || app.Panel.TaskNameBox.IsKeyboardFocused, "Opening timer puts input focus in task name");
+                CheckHoverToolRegion(app, app.Panel, "Timer");
                 CaptureGroup(app, Path.Combine(output, "02-empty-timer.png"));
                 Capture(app.Panel, Path.Combine(output, "02-panel-only.png"));
                 app.Panel.TaskNameBox.Text = "整理奇点的计划";
@@ -117,8 +123,8 @@ namespace Orbit
                 CheckLedOrb(app, output, "03-led-paused.png", false);
                 Click(ById<Button>(app.Panel, "task-" + timed.Id + "-play"));
                 Check(timed.Status == OrbitTaskStatus.Running, "The same row button resumes the timer");
-                app.ClickDot();
-                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible, "Clicking dot collapses both layers");
+                app.DismissPreviewForTest(OutsideToolsPoint(app)); Pump();
+                Check(!app.Launcher.IsVisible && !app.Panel.IsVisible && !app.Utilities.IsVisible, "Leaving the toolbar and task panel closes all tool layers while the countdown continues");
                 now = now.AddHours(1); app.Pulse();
                 Check(app.Engine.AlertTask == timed && app.Alerting && app.Reminder.IsVisible && app.ChimeRequests == 1, "Task completes and reminds while all tools are collapsed");
                 app.ClickDot(); app.Pulse(); app.Pulse();
@@ -126,6 +132,7 @@ namespace Orbit
                 app.ShowLauncher(); Click(app.Launcher.ToolButton("notes")); Pump();
                 Check(app.Utilities.IsVisible && app.Utilities.Mode == "notes" && !app.Panel.IsVisible, "Notepad opens in the same tool position");
                 Check(Math.Abs(app.Utilities.ActualWidth - 320) < 1, "Utility panel preserves its full width on first opening");
+                CheckHoverToolRegion(app, app.Utilities, "Notepad");
                 app.Utilities.NotesEditor.Text = "让一个人的小工具，帮到更多人。\n今天先做好这一件事。"; app.Utilities.Flush();
                 Check(File.ReadAllText(Path.Combine(output, "state", "notes.txt")).Contains("帮到更多人"), "Notepad persists text to its isolated local file");
                 CaptureGroup(app, Path.Combine(output, "04-notes.png"));
@@ -789,6 +796,30 @@ namespace Orbit
             Check(Placement.Rectangle(app.Panel).Top >= Placement.Rectangle(app.Launcher).Bottom && Math.Abs(app.Panel.ActualHeight - TaskPanel.PreferredHeight) < 1, "Dragging back to free space restores the normal panel height and downward position");
         }
 
+        private static void CheckHoverToolRegion(AppController app, Window tool, string label)
+        {
+            var bar = Placement.Bounds(app.Launcher); var child = Placement.Bounds(tool);
+            double transitY = child.Top >= bar.Bottom ? (bar.Bottom + child.Top) / 2.0 :
+                child.Bottom <= bar.Top ? (child.Bottom + bar.Top) / 2.0 : (child.Top + child.Bottom) / 2.0;
+            app.DismissPreviewForTest(new Point((bar.Left + bar.Right) / 2.0, transitY)); Pump();
+            Check(app.Launcher.IsVisible && tool.IsVisible, label + ": crossing from the toolbar to the child retains both windows");
+            app.DismissPreviewForTest(WindowCenter(tool)); Pump();
+            Check(app.Launcher.IsVisible && tool.IsVisible, label + ": the child interior remains part of the shared hover region");
+        }
+
+        private static Point WindowCenter(Window window)
+        {
+            var bounds = Placement.Bounds(window);
+            return new Point((bounds.Left + bounds.Right) / 2.0, (bounds.Top + bounds.Bottom) / 2.0);
+        }
+
+        private static Point OutsideToolsPoint(AppController app)
+        {
+            var bounds = new[] { app.Dot, (Window)app.Launcher, app.Panel, app.Utilities }
+                .Where(window => window.IsVisible).Select(window => Placement.Bounds(window)).ToArray();
+            return new Point(bounds.Max(rect => rect.Right) + 64, bounds.Max(rect => rect.Bottom) + 64);
+        }
+
         private static bool Inside(Placement.NativeRect b, System.Drawing.Rectangle a) { return b.Left >= a.Left && b.Top >= a.Top && b.Right <= a.Right && b.Bottom <= a.Bottom; }
         private static void Check(bool value, string label) { if (!value) throw new InvalidOperationException(label); checks++; report.AppendLine("PASS " + label); }
         private static void Click(Button button) { if (button == null) throw new InvalidOperationException("Expected button was not rendered."); button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent)); }
@@ -872,7 +903,7 @@ namespace Orbit
                 double centroidX = red == 0 ? Double.NaN : redXSum / red;
                 report.AppendLine("LED " + fileName + ": red centroid X=" + centroidX.ToString("0.00") + " DIP");
                 Check(red > 0 && centroidX < maxRedCentroidX.Value && (!minRedCentroidX.HasValue || centroidX >= minRedCentroidX.Value),
-                    minRedCentroidX.HasValue ? "A distant pointer leaves the idle LED eye centered instead of following across the desktop" : "A nearby pointer can move the LED eye close to the left face edge");
+                    minRedCentroidX.HasValue ? "A pointer beyond the monitor-relative fade region leaves the idle LED eye centered" : "A pointer at one quarter of the monitor width still turns the LED eye fully toward the left face edge");
             }
             if (fileName == "00-led-idle-right-up.png")
             {
