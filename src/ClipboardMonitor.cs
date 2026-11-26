@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -26,6 +27,7 @@ namespace Orbit
         private const int WmClipboardUpdate = 0x031D;
         private static readonly int[] RetryDelays = { 25, 50, 100, 200, 350 };
         private static readonly string[] PngFormats = { "PNG", "image/png" };
+        private static readonly long ImageCooldownTicks = Stopwatch.Frequency * 120 / 1000;
         private readonly Window owner;
         private readonly Dispatcher dispatcher;
         private readonly Action<ClipboardEntry> captured;
@@ -47,6 +49,7 @@ namespace Orbit
         private uint handledSequence;
         private uint retrySequence;
         private int retryAttempt;
+        private long? lastImageCapture;
 
         internal ClipboardMonitor(Window owner, Action<ClipboardEntry> captured, Action<string> status)
             : this(owner, captured, status, GetClipboardSequenceNumber,
@@ -95,7 +98,7 @@ namespace Orbit
             source = HwndSource.FromHwnd(handle);
             if (source == null) { started = false; status("剪贴板监听暂时无法启动。"); return; }
             source.AddHook(hook);
-            if (!AddClipboardFormatListener(handle))
+            if (!RegisterWithBaseline(delegate { return AddClipboardFormatListener(handle); }))
             {
                 int error = Marshal.GetLastWin32Error();
                 source.RemoveHook(hook);
@@ -105,7 +108,24 @@ namespace Orbit
                 return;
             }
             registered = true;
-            RequestCapture();
+        }
+
+        // Shared with in-memory fixtures so listener startup can be exercised
+        // without registering a window or accessing the real clipboard.
+        internal bool RegisterWithBaseline(Func<bool> registerListener)
+        {
+            dispatcher.VerifyAccess();
+            if (registerListener == null) throw new ArgumentNullException("registerListener");
+            if (disposed) return false;
+            uint before = sequence();
+            if (!registerListener()) return false;
+            uint after = sequence();
+            // Existing clipboard contents predate this listener. Treat them as
+            // handled, but retain a copy that happened while registration ran.
+            // Zero is unknown: only two known, different numbers prove a change.
+            MarkHandled(before != 0 ? before : after);
+            if (before != 0 && after != 0 && after != before) RequestCapture();
+            return true;
         }
 
         private IntPtr OnWindowMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -173,6 +193,12 @@ namespace Orbit
                 return;
             }
             // Keep application callback failures separate from codec failures.
+            if (entry != null && entry.IsImage)
+            {
+                long now = Stopwatch.GetTimestamp();
+                if (lastImageCapture.HasValue && now - lastImageCapture.Value < ImageCooldownTicks) return;
+                lastImageCapture = now;
+            }
             if (entry != null) captured(entry);
             if (!String.IsNullOrEmpty(notice)) status(notice);
         }

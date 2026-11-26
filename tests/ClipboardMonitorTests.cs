@@ -26,11 +26,13 @@ namespace Orbit
             try
             {
                 if (Application.Current == null) new Application();
+                Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
                 TestText();
                 TestPngAndBitmap();
                 TestDib();
                 TestFiles(directory);
                 TestInvalidImages();
+                TestStartupBaseline();
                 TestTransport();
                 Console.WriteLine("PASS " + checks + " clipboard monitor checks; all clipboard access used in-memory fixtures.");
                 foreach (string path in Directory.GetFiles(directory)) File.Delete(path);
@@ -186,6 +188,100 @@ namespace Orbit
             Throws<InvalidDataException>(delegate { ClipboardMonitor.ReadData(oversized, Now); }, "encoded size cap enforced");
         }
 
+        private static void TestStartupBaseline()
+        {
+            var window = new Window();
+            var oldImage = new DataObject();
+            oldImage.SetImage(Bitmap(new byte[] { 0, 0, 200, 255, 0, 180, 0, 255, 160, 0, 0, 255, 30, 40, 50, 255 }));
+            var transport = new FakeTransport { Sequence = 40, Data = oldImage };
+            var captures = new List<ClipboardEntry>();
+            using (var monitor = new ClipboardMonitor(window, captures.Add, null,
+                delegate { return transport.Sequence; }, transport.Read, transport.Write))
+            {
+                Check(monitor.RegisterWithBaseline(delegate { return true; }), "fake listener registration succeeds");
+                Pump(30);
+                Check(captures.Count == 0 && transport.ReadCount == 0, "startup does not replay or read an existing clipboard image");
+                monitor.RequestCapture(); Pump(30);
+                Check(captures.Count == 0 && transport.ReadCount == 0, "notification for the startup baseline is ignored");
+                transport.Sequence++; transport.Data = TextData("first new copy after startup");
+                monitor.RequestCapture(); Pump(30);
+                Check(captures.Count == 1 && captures[0].Text == "first new copy after startup", "first genuinely new copy after startup is captured");
+                transport.Sequence++; transport.Data = oldImage;
+                monitor.RequestCapture(); Pump(30);
+                transport.Sequence++;
+                monitor.RequestCapture(); Pump(30);
+                Check(captures.Count == 2 && captures[1].IsImage, "Only the first image is recorded during the short cooldown");
+                transport.Sequence++; transport.Data = TextData("text during image cooldown");
+                monitor.RequestCapture(); Pump(30);
+                Check(captures.Count == 3 && captures[2].Text == "text during image cooldown", "Image cooldown does not suppress text");
+                Pump(150);
+                transport.Sequence++; transport.Data = oldImage;
+                monitor.RequestCapture(); Pump(30);
+                Check(captures.Count == 4 && captures[3].IsImage, "Images are recorded again after the cooldown");
+            }
+
+            captures.Clear();
+            transport = new FakeTransport { Sequence = 70, Data = TextData("before registration") };
+            using (var monitor = new ClipboardMonitor(window, captures.Add, null,
+                delegate { return transport.Sequence; }, transport.Read, transport.Write))
+            {
+                monitor.RegisterWithBaseline(delegate
+                {
+                    transport.Sequence++; transport.Data = TextData("copied during registration"); return true;
+                });
+                Pump(30);
+                Check(captures.Count == 1 && captures[0].Text == "copied during registration", "known sequence change during registration is captured");
+                monitor.RequestCapture(); Pump(30);
+                Check(captures.Count == 1 && transport.ReadCount == 1, "queued native notification does not replay the registration-race capture");
+            }
+
+            uint[] beforeValues = { 0, 0, 80 };
+            uint[] afterValues = { 0, 80, 0 };
+            for (int i = 0; i < beforeValues.Length; i++)
+            {
+                captures.Clear();
+                transport = new FakeTransport { Sequence = beforeValues[i], Data = TextData("existing unknown-sequence clipboard") };
+                uint afterRegistration = afterValues[i];
+                using (var monitor = new ClipboardMonitor(window, captures.Add, null,
+                    delegate { return transport.Sequence; }, transport.Read, transport.Write))
+                {
+                    monitor.RegisterWithBaseline(delegate { transport.Sequence = afterRegistration; return true; });
+                    Pump(30);
+                    Check(captures.Count == 0 && transport.ReadCount == 0, "unknown registration sequence does not imply a new copy: case " + i);
+                    if (beforeValues[i] != 0 || afterValues[i] != 0)
+                    {
+                        transport.Sequence = 80;
+                        monitor.RequestCapture(); Pump(30);
+                        Check(captures.Count == 0 && transport.ReadCount == 0, "known side of an unknown registration boundary is retained: case " + i);
+                    }
+                    // Even when the sequence API remains unavailable, an actual
+                    // later notification must still be able to capture data.
+                    transport.Sequence = i == 0 ? 0u : 81u;
+                    transport.Data = TextData("new copy with earlier unknown baseline");
+                    monitor.RequestCapture(); Pump(30);
+                    Check(captures.Count == 1 && captures[0].Text == "new copy with earlier unknown baseline", "next notification works after an unknown startup sequence: case " + i);
+                }
+            }
+
+            captures.Clear();
+            transport = new FakeTransport { Sequence = 90, Data = TextData("before failed registration") };
+            using (var monitor = new ClipboardMonitor(window, captures.Add, null,
+                delegate { return transport.Sequence; }, transport.Read, transport.Write))
+            {
+                Check(!monitor.RegisterWithBaseline(delegate { return false; }), "failed listener registration is reported to Attach");
+                Pump(30);
+                Check(captures.Count == 0 && transport.ReadCount == 0, "failed registration never queues a clipboard read");
+                transport.Sequence++;
+                monitor.RegisterWithBaseline(delegate { return true; });
+                Pump(30);
+                Check(captures.Count == 0 && transport.ReadCount == 0, "successful registration retry establishes its own baseline");
+                transport.Sequence++; transport.Data = TextData("new copy after registration retry");
+                monitor.RequestCapture(); Pump(30);
+                Check(captures.Count == 1 && captures[0].Text == "new copy after registration retry", "first new event after a registration retry is captured");
+            }
+            window.Close();
+        }
+
         private static void TestTransport()
         {
             var window = new Window();
@@ -196,7 +292,7 @@ namespace Orbit
                 delegate { return transport.Sequence; }, transport.Read, transport.Write))
             {
                 monitor.RequestCapture(); Pump(35);
-                Check(captures.Count == 1 && captures[0].Text == "first", "initial request captures current data");
+                Check(captures.Count == 1 && captures[0].Text == "first", "explicit capture request reads current data");
                 int reads = transport.ReadCount;
                 monitor.RequestCapture(); Pump(30);
                 Check(captures.Count == 1 && transport.ReadCount == reads, "same sequence is deduplicated without reading again");
