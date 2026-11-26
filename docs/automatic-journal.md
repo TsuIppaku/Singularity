@@ -37,6 +37,8 @@ Orbit 的中间按钮仍然用来随手写东西。每次打开先看到今天�
 
 OpenAI 官方支持在 ChatGPT 桌面应用中授权 dot 使用本机，使用时电脑需在线且 ChatGPT 应用保持打开。Orbit 直连的方式需要单独验证。本地日记默认只在本机保存，后续共享以用户选定的日期和字段为准。 [OpenAI 的 dot 使用说明](https://help.openai.com/en/articles/20001530-getting-started-with-your-dot)
 
+dot 主动发来的消息如何出现在小球上，见 [小球视线与提醒任务文档](orbit-companion-reminders.md)。
+
 ## 5. 开发顺序与验收
 
 | 阶段 | 交付 | 验收 |
