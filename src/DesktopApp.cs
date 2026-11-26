@@ -467,13 +467,14 @@ namespace Orbit
                 target.UpdateLayout();
                 PlaceToolsNow();
                 // A move to another DPI can enqueue a fresh WPF layout. Keep the
-                // window transparent until that render/layout turn has settled.
+                // window transparent until that render/layout turn has settled,
+                // then reveal the finished window in one step. Per-level fades
+                // made the launcher and child panels look like they were flashing.
                 target.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(delegate
                 {
                     if (IsExiting || !target.IsVisible || showVersions[target] != version) return;
                     if (mode != null && Launcher.Selected != mode) return;
                     PlaceToolsNow();
-                    if (!IsTest) Motion.Reveal(target);
                     target.Opacity = 1;
                     if (mode != null) FocusTool(mode);
                 }));
@@ -605,6 +606,16 @@ namespace Orbit
                 if (current != null && current.Id == id && current.Status == OrbitTaskStatus.Running) Engine.Pause(Now());
                 else Engine.Start(id, Now());
             });
+        }
+
+        internal void RestartTask(string id)
+        {
+            Act(delegate { Engine.Restart(id, Now()); });
+        }
+
+        internal bool EditTask(string id, string name, double durationSeconds)
+        {
+            return Act(delegate { Engine.EditTask(id, name, durationSeconds, Now()); });
         }
 
         internal bool Act(Action action)

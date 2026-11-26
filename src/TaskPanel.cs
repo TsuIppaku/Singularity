@@ -187,46 +187,88 @@ namespace Orbit
             var grid = new Grid();
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(13) });
             grid.ColumnDefinitions.Add(new ColumnDefinition());
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(32) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(task.IsChecklist ? 56 : task.Status != OrbitTaskStatus.Completed ? 96 : 32) });
             row.Surface.Child = grid;
 
             var grip = new VectorIcon("grip", 12, "#766A85") { VerticalAlignment = VerticalAlignment.Center, Visibility = draggable ? Visibility.Visible : Visibility.Hidden, Cursor = draggable ? Cursors.SizeAll : Cursors.Arrow, ToolTip = draggable ? "拖动排序" : null };
             grid.Children.Add(grip);
-            var labels = new StackPanel { Margin = new Thickness(4, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
+            var labelHost = new Grid { Margin = new Thickness(4, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
+            row.Labels = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             row.Name = new TextBlock { Text = task.Name, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 13, ToolTip = task.Name };
             row.Time = new TextBlock { FontFamily = new FontFamily("Consolas, Microsoft YaHei UI"), FontSize = 11.5, Margin = new Thickness(0, 3, 0, 0), Foreground = Display.Brush("#99A1AF"), TextTrimming = TextTrimming.CharacterEllipsis };
-            labels.Children.Add(row.Name);
-            labels.Children.Add(row.Time);
-            Grid.SetColumn(labels, 1);
-            grid.Children.Add(labels);
+            row.Labels.Children.Add(row.Name);
+            row.Labels.Children.Add(row.Time);
+            labelHost.Children.Add(row.Labels);
+            if (!task.IsChecklist && task.Status != OrbitTaskStatus.Completed)
+            {
+                row.Editor = new Grid { Visibility = Visibility.Collapsed };
+                row.Editor.ColumnDefinitions.Add(new ColumnDefinition());
+                row.Editor.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6) });
+                row.Editor.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
+                row.EditName = new TextBox { Height = 28, MaxLength = 100, VerticalContentAlignment = VerticalAlignment.Center };
+                row.EditDuration = new TextBox { Height = 28, MaxLength = 40, HorizontalContentAlignment = HorizontalAlignment.Center, VerticalContentAlignment = VerticalAlignment.Center };
+                System.Windows.Automation.AutomationProperties.SetAutomationId(row.EditName, "task-" + task.Id + "-edit-name");
+                System.Windows.Automation.AutomationProperties.SetAutomationId(row.EditDuration, "task-" + task.Id + "-edit-duration");
+                row.EditName.KeyDown += delegate(object sender, KeyEventArgs e) { EditKey(row, e); };
+                row.EditDuration.KeyDown += delegate(object sender, KeyEventArgs e) { EditKey(row, e); };
+                row.Editor.Children.Add(row.EditName);
+                Grid.SetColumn(row.EditDuration, 2);
+                row.Editor.Children.Add(row.EditDuration);
+                labelHost.Children.Add(row.Editor);
+            }
+            Grid.SetColumn(labelHost, 1);
+            grid.Children.Add(labelHost);
 
             if (task.IsChecklist)
             {
+                row.Actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
                 row.Check = new CheckBox { IsChecked = task.Status == OrbitTaskStatus.Completed, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
                 System.Windows.Automation.AutomationProperties.SetName(row.Check, "完成 " + task.Name);
                 System.Windows.Automation.AutomationProperties.SetAutomationId(row.Check, "task-" + task.Id + "-check");
                 row.Check.Click += delegate { app.Act(delegate { app.Engine.ToggleChecklist(task.Id, app.Now()); }); };
-                Grid.SetColumn(row.Check, 2);
-                grid.Children.Add(row.Check);
+                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 15, "#E47B7E"));
+                row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
+                row.Actions.Children.Add(row.Delete);
+                row.Actions.Children.Add(row.Check);
+                Grid.SetColumn(row.Actions, 2);
+                grid.Children.Add(row.Actions);
+                Motion.WireHover(row.Delete);
+                Motion.WirePress(row.Delete);
                 Motion.WireHover(row.Check);
                 Motion.WirePress(row.Check);
             }
             else if (task.Status != OrbitTaskStatus.Completed)
             {
-                row.Play = new Button { Width = 30, Height = 32, Padding = new Thickness(0), VerticalAlignment = VerticalAlignment.Center };
+                row.Actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+                row.Edit = RowAction("编辑任务", "task-" + task.Id + "-edit", new VectorIcon("edit", 14, "#AAA1B4"));
+                row.Edit.Click += delegate { ToggleEdit(row); };
+                row.Restart = RowAction("重新开始", "task-" + task.Id + "-restart", new VectorIcon("restart", 15, "#AAA1B4"));
+                row.Restart.Click += delegate { app.RestartTask(task.Id); };
+                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 15, "#E47B7E"));
+                row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
+                row.Play = RowAction("开始或暂停 " + task.Name, "task-" + task.Id + "-play", null);
                 System.Windows.Automation.AutomationProperties.SetName(row.Play, "开始或暂停 " + task.Name);
-                System.Windows.Automation.AutomationProperties.SetAutomationId(row.Play, "task-" + task.Id + "-play");
                 row.Play.Click += delegate { app.StartTask(task.Id); };
-                Grid.SetColumn(row.Play, 2);
-                grid.Children.Add(row.Play);
+                row.Actions.Children.Add(row.Edit);
+                row.Actions.Children.Add(row.Restart);
+                row.Actions.Children.Add(row.Delete);
+                row.Actions.Children.Add(row.Play);
+                Grid.SetColumn(row.Actions, 2);
+                grid.Children.Add(row.Actions);
+                Motion.WireHover(row.Edit); Motion.WirePress(row.Edit);
+                Motion.WireHover(row.Restart); Motion.WirePress(row.Restart);
+                Motion.WireHover(row.Delete); Motion.WirePress(row.Delete);
                 Motion.WireHover(row.Play);
                 Motion.WirePress(row.Play);
             }
             else
             {
-                var done = new VectorIcon("check", 16, "#9B8BA8") { HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-                Grid.SetColumn(done, 2);
-                grid.Children.Add(done);
+                row.Delete = RowAction("删除任务", "task-" + task.Id + "-delete", new VectorIcon("trash", 15, "#E47B7E"));
+                row.Delete.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
+                Grid.SetColumn(row.Delete, 2);
+                grid.Children.Add(row.Delete);
+                Motion.WireHover(row.Delete);
+                Motion.WirePress(row.Delete);
             }
 
             row.Before = new Border { Height = 2, Background = Display.Brush("#B79ADB"), VerticalAlignment = VerticalAlignment.Top, CornerRadius = new CornerRadius(1), Visibility = Visibility.Collapsed, IsHitTestVisible = false };
@@ -255,6 +297,64 @@ namespace Orbit
             remove.Click += delegate { app.Act(delegate { app.Engine.Delete(task.Id); }); };
             menu.Items.Add(remove);
             return menu;
+        }
+
+        private static Button RowAction(string tooltip, string automationId, object content)
+        {
+            var button = new Button
+            {
+                Width = 24, Height = 30, Padding = new Thickness(0),
+                VerticalAlignment = VerticalAlignment.Center, ToolTip = tooltip,
+                Background = Brushes.Transparent, BorderBrush = Brushes.Transparent,
+                Content = content
+            };
+            System.Windows.Automation.AutomationProperties.SetName(button, tooltip);
+            System.Windows.Automation.AutomationProperties.SetAutomationId(button, automationId);
+            return button;
+        }
+
+        private void ToggleEdit(RowView row)
+        {
+            if (row.Editing) { CommitEdit(row); return; }
+            foreach (var other in rows.Where(item => item != row && item.Editing)) EndEdit(other);
+            row.Editing = true;
+            row.EditName.Text = row.Task.Name;
+            row.EditDuration.Text = Display.Duration(row.Task.DurationSeconds);
+            row.Labels.Visibility = Visibility.Collapsed;
+            row.Editor.Visibility = Visibility.Visible;
+            ClearError();
+            UpdateRow(row);
+            row.EditName.Focus();
+            row.EditName.SelectAll();
+        }
+
+        private void EditKey(RowView row, KeyEventArgs e)
+        {
+            if (e.Key == Key.Escape) { EndEdit(row); e.Handled = true; }
+            else if (e.Key == Key.Enter || e.Key == Key.Return) { CommitEdit(row); e.Handled = true; }
+        }
+
+        private void CommitEdit(RowView row)
+        {
+            if (!row.Editing) return;
+            double seconds;
+            string error;
+            if (!TimerEngine.TryParseDuration(row.EditDuration.Text, out seconds, out error))
+            {
+                ShowError(error);
+                row.EditDuration.Focus();
+                return;
+            }
+            if (app.EditTask(row.Task.Id, row.EditName.Text, seconds)) EndEdit(row);
+        }
+
+        private void EndEdit(RowView row)
+        {
+            if (!row.Editing) return;
+            row.Editing = false;
+            row.Editor.Visibility = Visibility.Collapsed;
+            row.Labels.Visibility = Visibility.Visible;
+            UpdateRow(row);
         }
 
         private void UpdateRow(RowView row)
@@ -289,7 +389,20 @@ namespace Orbit
                     }
                     row.Play.ToolTip = active ? "暂停倒计时" : paused ? "继续倒计时" : "开始倒计时";
                 }
+                if (row.Edit != null)
+                {
+                    row.Edit.Visibility = row.Hovered || row.Editing ? Visibility.Visible : Visibility.Hidden;
+                    string kind = row.Editing ? "check" : "edit";
+                    if (row.EditIconKind != kind)
+                    {
+                        row.EditIconKind = kind;
+                        row.Edit.Content = new VectorIcon(kind, 14, row.Editing ? "#BFE2D5" : "#AAA1B4");
+                    }
+                    row.Edit.ToolTip = row.Editing ? "保存修改 · Enter" : "编辑名称和时长";
+                }
+                if (row.Restart != null) row.Restart.Visibility = row.Hovered || row.Editing ? Visibility.Visible : Visibility.Hidden;
             }
+            if (row.Delete != null) row.Delete.Opacity = row.Hovered || row.Editing ? 1 : 0.72;
         }
 
         private void WireDrag(RowView row)
@@ -368,14 +481,16 @@ namespace Orbit
         private sealed class RowView
         {
             internal OrbitTask Task;
-            internal Grid Outer;
+            internal Grid Outer, Editor;
             internal Border Surface, Before, After;
+            internal StackPanel Labels, Actions;
             internal TextBlock Name, Time;
-            internal Button Play;
+            internal TextBox EditName, EditDuration;
+            internal Button Play, Edit, Restart, Delete;
             internal VectorIcon PlayIcon;
-            internal string PlayIconKind;
+            internal string PlayIconKind, EditIconKind;
             internal CheckBox Check;
-            internal bool Hovered, CompletedGroup;
+            internal bool Hovered, CompletedGroup, Editing;
         }
     }
 }

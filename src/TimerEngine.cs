@@ -267,15 +267,49 @@ namespace Orbit
 
         public void Restart(DateTimeOffset now)
         {
+            OrbitTask current = ActiveTask;
+            if (current != null) Restart(current.Id, now);
+        }
+
+        public void Restart(string id, DateTimeOffset now)
+        {
             Tick(now);
             RequireAcknowledgedAlert();
+            OrbitTask task = Find(id);
+            if (task == null) throw new ArgumentException("找不到这项任务。", "id");
+            if (task.IsChecklist) throw new InvalidOperationException("无时长任务不能重新开始计时。 ");
+            if (task.Status == OrbitTaskStatus.Completed) throw new InvalidOperationException("已完成的任务不能重新开始，请创建新任务。 ");
             OrbitTask current = ActiveTask;
-            if (current == null) return;
-            DateTimeOffset deadline = now.ToUniversalTime().AddSeconds(current.DurationSeconds);
-            current.RemainingSeconds = current.DurationSeconds;
-            current.DueAtUtc = deadline;
-            current.CompletedAtUtc = null;
-            current.Status = OrbitTaskStatus.Running;
+            if (current != null && current != task && current.Status == OrbitTaskStatus.Running)
+            {
+                current.Status = OrbitTaskStatus.Paused;
+                current.DueAtUtc = null;
+            }
+            task.RemainingSeconds = task.DurationSeconds;
+            task.DueAtUtc = now.ToUniversalTime().AddSeconds(task.DurationSeconds);
+            task.CompletedAtUtc = null;
+            task.Status = OrbitTaskStatus.Running;
+            State.ActiveTaskId = task.Id;
+        }
+
+        public void EditTask(string id, string name, double durationSeconds, DateTimeOffset now)
+        {
+            OrbitTask task = Find(id);
+            if (task == null) throw new ArgumentException("找不到这项任务。", "id");
+            Tick(now);
+            if (task.IsChecklist) throw new InvalidOperationException("无时长任务不能修改为计时任务。 ");
+            if (task.Status == OrbitTaskStatus.Completed) throw new InvalidOperationException("已完成的任务不能修改。 ");
+            if (!IsValidDuration(durationSeconds)) throw new ArgumentException("时长需要在 1 秒到 24 小时之间。", "durationSeconds");
+            string nextName = (name ?? String.Empty).Trim();
+            if (nextName.Length == 0) throw new ArgumentException("请输入任务名称。", "name");
+            // Keep the current progress ratio when a running or paused timer is
+            // edited, rather than unexpectedly resetting or finishing it.
+            double ratio = task.DurationSeconds <= 0 ? 1 : Math.Max(0, Math.Min(1, task.RemainingSeconds / task.DurationSeconds));
+            task.Name = nextName;
+            task.DurationSeconds = durationSeconds;
+            task.RemainingSeconds = durationSeconds * ratio;
+            if (task.Status == OrbitTaskStatus.Running)
+                task.DueAtUtc = now.ToUniversalTime().AddSeconds(task.RemainingSeconds);
         }
 
         public void Complete(DateTimeOffset now)

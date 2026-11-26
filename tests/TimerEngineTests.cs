@@ -26,6 +26,7 @@ internal static class TimerEngineTests
         Run("checklist recovery preserves zero durations", ChecklistRecovery);
         Run("reordering preserves active timers and task identity", ReorderPreservesTasks);
         Run("invalid additions do not mutate state", InvalidAdditions);
+        Run("editing and restarting timed tasks", EditingAndRestarting);
         Console.WriteLine(failures == 0 ? "All 14 timer test groups passed." : failures + " timer test group(s) failed.");
         return failures == 0 ? 0 : 1;
     }
@@ -124,6 +125,27 @@ internal static class TimerEngineTests
         engine.Pause(Epoch);
         engine.Resume(Epoch);
         engine.Complete(Epoch);
+    }
+
+    private static void EditingAndRestarting()
+    {
+        TimerEngine engine = new TimerEngine(null);
+        OrbitTask task = engine.AddTask("Draft", 120, true, Epoch);
+        engine.Tick(Epoch.AddSeconds(30));
+        engine.EditTask(task.Id, "Revised", 60, Epoch.AddSeconds(30));
+        Assert(task.Name == "Revised" && task.Status == OrbitTaskStatus.Running, "Editing should keep an active task running.");
+        Equal(45, task.RemainingSeconds, "Editing duration keeps the current completion ratio.");
+        Assert(task.DueAtUtc == Epoch.AddSeconds(75), "Editing an active task moves its deadline from now.");
+        engine.Pause(Epoch.AddSeconds(35));
+        engine.EditTask(task.Id, "Revised again", 100, Epoch.AddSeconds(35));
+        Assert(task.Status == OrbitTaskStatus.Paused && task.Name == "Revised again", "Editing a paused task should not restart it.");
+        Equal(100.0 * 40.0 / 60.0, task.RemainingSeconds, "Paused task editing keeps its current completion ratio.");
+        engine.Restart(task.Id, Epoch.AddSeconds(40));
+        Assert(task.Status == OrbitTaskStatus.Running && engine.ActiveTask == task, "Restarting a task makes it active.");
+        Equal(100, task.RemainingSeconds, "Restarting restores the edited full duration.");
+        Assert(task.DueAtUtc == Epoch.AddSeconds(140), "Restarting sets a new deadline from now.");
+        Expect<ArgumentException>(() => engine.EditTask(task.Id, "", 100, Epoch.AddSeconds(40)));
+        Expect<ArgumentException>(() => engine.EditTask(task.Id, "Still revised", 0, Epoch.AddSeconds(40)));
     }
 
     private static void AlertProtection()
