@@ -24,6 +24,9 @@ namespace Orbit
         private const int HistorySlotCount = 3;
         private const int ClipboardSlotsHeight = 240;
         private const double LockConfirmationSize = 11;
+        private const double ClipboardActionSize = 24;
+        private const double ClipboardActionGap = 3;
+        private const double ClipboardDeleteGap = 9;
         private readonly AppController app;
         private readonly string dataDirectory;
         private readonly TextBlock title;
@@ -434,7 +437,10 @@ namespace Orbit
             view.ThumbnailColumn = new ColumnDefinition { Width = new GridLength(0) };
             grid.ColumnDefinitions.Add(view.ThumbnailColumn);
             grid.ColumnDefinitions.Add(new ColumnDefinition());
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(52) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition
+            {
+                Width = new GridLength(ClipboardActionSize * 3 + ClipboardActionGap + ClipboardDeleteGap)
+            });
             card.Child = grid;
 
             view.Image = new Image { Stretch = Stretch.Uniform, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
@@ -475,46 +481,30 @@ namespace Orbit
             Grid.SetColumn(labels, 1);
             grid.Children.Add(labels);
 
-            var actions = new Grid { VerticalAlignment = VerticalAlignment.Center };
-            actions.ColumnDefinitions.Add(new ColumnDefinition());
-            actions.ColumnDefinitions.Add(new ColumnDefinition());
-            if (!view.IsLockedSlot)
+            var actions = new StackPanel
             {
-                actions.RowDefinitions.Add(new RowDefinition { Height = new GridLength(22) });
-                actions.RowDefinitions.Add(new RowDefinition { Height = new GridLength(21) });
-            }
+                Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center,
+                Background = Brushes.Transparent
+            };
+            var primaryActions = new StackPanel { Orientation = Orientation.Horizontal };
+            actions.Children.Add(new Border
+            {
+                Background = ColorBrush("#302C3B"), CornerRadius = new CornerRadius(6), Child = primaryActions
+            });
+
+            view.Copy = ClipboardAction("clipboard", "#CFC2DF", "复制此项", "CopySlot" + (index + 1), delegate { CopyCard(view); });
+            view.Copy.Margin = new Thickness(0, 0, ClipboardActionGap, 0);
+            primaryActions.Children.Add(view.Copy);
+
             string lockLabel = view.IsLockedSlot ? "解除锁定" : "锁定此项";
-            view.LockToggle = SmallButton(String.Empty, lockLabel, delegate { ToggleClipboardLock(view); });
-            view.LockToggle.Content = new VectorIcon(view.IsLockedSlot ? "unlock" : "lock", 15, view.IsLockedSlot ? "#E8C574" : "#B7AAC5");
-            view.LockToggle.Width = 24;
-            view.LockToggle.Height = 24;
-            view.LockToggle.Padding = new Thickness(0);
-            view.LockToggle.Margin = new Thickness(0);
-            view.LockToggle.Background = Brushes.Transparent;
-            if (!view.IsLockedSlot) Grid.SetRowSpan(view.LockToggle, 2);
-            AutomationProperties.SetAutomationId(view.LockToggle, view.IsLockedSlot ? "UnlockSlot4" : "LockSlot" + (index + 1));
-            actions.Children.Add(view.LockToggle);
-            view.Copy = SmallButton(String.Empty, "复制此项", delegate { CopyCard(view); });
-            view.Copy.Content = new VectorIcon("clipboard", 16, "#CFC2DF");
-            view.Copy.Width = 24;
-            view.Copy.Height = 22;
-            view.Copy.Padding = new Thickness(0);
-            view.Copy.Margin = new Thickness(0);
-            Grid.SetColumn(view.Copy, 1);
-            AutomationProperties.SetAutomationId(view.Copy, "CopySlot" + (index + 1));
-            actions.Children.Add(view.Copy);
+            view.LockToggle = ClipboardAction(view.IsLockedSlot ? "lock" : "unlock", view.IsLockedSlot ? "#E8C574" : "#B7AAC5", lockLabel,
+                view.IsLockedSlot ? "UnlockSlot4" : "LockSlot" + (index + 1), delegate { ToggleClipboardLock(view); });
+            primaryActions.Children.Add(view.LockToggle);
+
             if (!view.IsLockedSlot)
             {
-                view.Delete = SmallButton(String.Empty, "删除此项", delegate { DeleteCard(view); });
-                view.Delete.Content = new VectorIcon("close", 13, "#9D91AB");
-                view.Delete.Width = 24;
-                view.Delete.Height = 20;
-                view.Delete.Padding = new Thickness(0);
-                view.Delete.Margin = new Thickness(0);
-                view.Delete.Background = Brushes.Transparent;
-                Grid.SetColumn(view.Delete, 1);
-                Grid.SetRow(view.Delete, 1);
-                AutomationProperties.SetAutomationId(view.Delete, "DeleteSlot" + (index + 1));
+                view.Delete = ClipboardAction("trash", "#9D91AB", "删除此项", "DeleteSlot" + (index + 1), delegate { DeleteCard(view); });
+                view.Delete.Margin = new Thickness(ClipboardDeleteGap, 0, 0, 0);
                 actions.Children.Add(view.Delete);
             }
             Grid.SetColumn(actions, 2);
@@ -527,7 +517,7 @@ namespace Orbit
             card.PreviewMouseLeftButtonDown += delegate(object sender, MouseButtonEventArgs e)
             {
                 suppressClipboardMouseUp = false;
-                if (IsInteractiveChild(e.OriginalSource as DependencyObject, card)) return;
+                if (IsInteractiveChild(e.OriginalSource as DependencyObject, card, actions)) return;
                 if (BeginClipboardGesture(index, e.GetPosition(this), true)) e.Handled = true;
             };
             card.PreviewMouseMove += delegate(object sender, MouseEventArgs e)
@@ -537,7 +527,7 @@ namespace Orbit
             };
             card.PreviewMouseLeftButtonUp += delegate(object sender, MouseButtonEventArgs e)
             {
-                if (clipboardGesture == null && IsInteractiveChild(e.OriginalSource as DependencyObject, card)) return;
+                if (clipboardGesture == null && IsInteractiveChild(e.OriginalSource as DependencyObject, card, actions)) return;
                 if (suppressClipboardMouseUp)
                 {
                     suppressClipboardMouseUp = false;
@@ -566,7 +556,7 @@ namespace Orbit
             card.KeyDown += delegate(object sender, KeyEventArgs e)
             {
                 if (e.Key != Key.Enter && e.Key != Key.Space) return;
-                if (IsInteractiveChild(e.OriginalSource as DependencyObject, card)) return;
+                if (IsInteractiveChild(e.OriginalSource as DependencyObject, card, actions)) return;
                 CopyCard(view);
                 e.Handled = true;
             };
@@ -946,11 +936,11 @@ namespace Orbit
             view.Card.BorderBrush = ColorBrush(view.IsLockedSlot ? hover ? "#F0CA75" : "#C49E52" : hover ? "#716082" : "#383440");
         }
 
-        private static bool IsInteractiveChild(DependencyObject origin, DependencyObject card)
+        private static bool IsInteractiveChild(DependencyObject origin, DependencyObject card, DependencyObject actions)
         {
             while (origin != null && origin != card)
             {
-                if (origin is ButtonBase || origin is TextBoxBase) return true;
+                if (origin == actions || origin is ButtonBase || origin is TextBoxBase) return true;
                 var visual = origin as Visual;
                 origin = visual != null ? VisualTreeHelper.GetParent(visual) : LogicalTreeHelper.GetParent(origin);
             }
@@ -1046,6 +1036,22 @@ namespace Orbit
             button.Click += delegate { action(); };
             Motion.WireHover(button);
             Motion.WirePress(button);
+            return button;
+        }
+
+        private static Button ClipboardAction(string icon, string color, string label, string id, Action action)
+        {
+            var button = SmallButton(String.Empty, label, action);
+            var hover = ColorBrush("#4A3D59");
+            button.Content = new VectorIcon(icon, 16, color);
+            button.Width = ClipboardActionSize;
+            button.Height = ClipboardActionSize;
+            button.Padding = new Thickness(0);
+            button.Margin = new Thickness(0);
+            button.Background = Brushes.Transparent;
+            button.MouseEnter += delegate { button.Background = hover; };
+            button.MouseLeave += delegate { button.Background = Brushes.Transparent; };
+            AutomationProperties.SetAutomationId(button, id);
             return button;
         }
 

@@ -418,6 +418,7 @@ namespace Orbit
                 for (int i = 0; i < 4; i++) app.CaptureClipboardEntry(new ClipboardEntry { Text = "锁定后的新复制 " + i, CapturedAtUtc = now.AddSeconds(30 + i) });
                 Pump();
                 Check(app.ClipboardHistory.Entries.Count == 3 && app.ClipboardHistory.Entries[0].Text == "锁定后的新复制 3" && app.ClipboardHistory.LockedEntry.Id == initial.Id && app.ClipboardHistory.LockedEntry.Text == initial.Text, "Recent copies rotate through three slots while the locked content remains unchanged");
+                CheckClipboardRowActions(app.Utilities);
                 var recentOrder = app.ClipboardHistory.Entries.Select(entry => entry.Id).ToArray();
                 Click(ById<Button>(app.Utilities, "CopySlot4")); Pump();
                 Check(copies == 1 && copied != null && copied.Id == initial.Id && copied.Text == initial.Text && app.ClipboardHistory.LockedEntry.Id == initial.Id && app.ClipboardHistory.Entries.Select(entry => entry.Id).SequenceEqual(recentOrder), "Copying the locked text preserves the pin and recent-slot order");
@@ -501,6 +502,57 @@ namespace Orbit
                 app.ClipboardWriterForTest = null;
                 app.ClipboardDragRunnerForTest = null;
             }
+        }
+
+        private static void CheckClipboardRowActions(UtilityPanel panel)
+        {
+            panel.UpdateLayout();
+            Rect firstCopy = Rect.Empty, firstLock = Rect.Empty;
+            bool recentLayout = true, recentGlyphs = true;
+            for (int slot = 1; slot <= 3; slot++)
+            {
+                var card = ById<Border>(panel, "ClipboardCard" + slot);
+                var copy = ById<Button>(panel, "CopySlot" + slot);
+                var pin = ById<Button>(panel, "LockSlot" + slot);
+                var remove = ById<Button>(panel, "DeleteSlot" + slot);
+                if (card == null || copy == null || pin == null || remove == null)
+                    throw new InvalidOperationException("Expected the recent clipboard row's copy, lock and delete controls.");
+                Rect c = ClipboardActionBounds(copy, card), p = ClipboardActionBounds(pin, card), d = ClipboardActionBounds(remove, card);
+                double primaryGap = p.Left - c.Right, deleteGap = d.Left - p.Right;
+                recentLayout &= new[] { c, p, d }.All(bounds => Math.Abs(bounds.Width - 24) < 1 && Math.Abs(bounds.Height - 24) < 1)
+                    && Math.Abs(c.Top + c.Height / 2 - card.ActualHeight / 2) < 1
+                    && Math.Abs(c.Top - p.Top) < 1 && Math.Abs(c.Top - d.Top) < 1
+                    && primaryGap >= 0 && primaryGap <= 5 && deleteGap >= 8 && deleteGap <= 10
+                    && c.Left >= 0 && d.Right <= card.ActualWidth;
+                if (slot == 1) { firstCopy = c; firstLock = p; }
+                else recentLayout &= Math.Abs(c.Left - firstCopy.Left) < 1 && Math.Abs(p.Left - firstLock.Left) < 1;
+                var icon = pin.Content as VectorIcon;
+                recentGlyphs &= icon != null && icon.Kind == "unlock";
+            }
+            Check(recentLayout, "Recent clipboard actions share a centered 24-DIP row in Copy-Lock-Delete order, with a separate 8-10-DIP delete gap");
+
+            var lockedCard = ById<Border>(panel, "ClipboardCard4");
+            var lockedCopy = ById<Button>(panel, "CopySlot4");
+            var unlock = ById<Button>(panel, "UnlockSlot4");
+            if (lockedCard == null || lockedCopy == null || unlock == null)
+                throw new InvalidOperationException("Expected the locked clipboard row's copy and unlock controls.");
+            Rect lc = ClipboardActionBounds(lockedCopy, lockedCard), lu = ClipboardActionBounds(unlock, lockedCard);
+            Check(new[] { lc, lu }.All(bounds => Math.Abs(bounds.Width - 24) < 1 && Math.Abs(bounds.Height - 24) < 1)
+                && Math.Abs(lc.Top + lc.Height / 2 - lockedCard.ActualHeight / 2) < 1 && Math.Abs(lc.Top - lu.Top) < 1
+                && lc.Right <= lu.Left && Math.Abs(lc.Left - firstCopy.Left) < 1 && Math.Abs(lu.Left - firstLock.Left) < 1
+                && ById<Button>(panel, "DeleteSlot4") == null,
+                "The locked row keeps Copy-Unlock centered in the same columns without shifting into the absent delete column");
+            var lockedIcon = unlock.Content as VectorIcon;
+            Check(recentGlyphs && lockedIcon != null && lockedIcon.Kind == "lock", "Recent rows use the open-lock glyph and the pinned row uses the closed-lock glyph");
+        }
+
+        private static Rect ClipboardActionBounds(Button button, FrameworkElement card)
+        {
+            // Layout positions exclude the button's transient press/hover scale,
+            // so animation progress cannot change spacing regression results.
+            var parent = VisualTreeHelper.GetParent(button) as Visual;
+            Vector offset = VisualTreeHelper.GetOffset(button);
+            return parent.TransformToAncestor(card).TransformBounds(new Rect(new Point(offset.X, offset.Y), button.RenderSize));
         }
 
         private static void CheckOrbFileDropPreview(AppController app, string output)
